@@ -59,7 +59,11 @@ func runTUI() {
 	final := result.(tui.Model)
 
 	if path := final.NewSessionPath(); path != "" {
-		startNewSession(path, final.SkipPermissions)
+		if final.UseWorktree {
+			worktreeNewSession(path, final.SkipPermissions)
+		} else {
+			startNewSession(path, final.SkipPermissions)
+		}
 		return
 	}
 
@@ -183,6 +187,68 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 	}
 
 	fmt.Printf("Resuming session in worktree %s...\n", worktreePath)
+	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func worktreeNewSession(projectPath string, skipPermissions bool) {
+	// Find git repo root
+	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s is not a git repository\n", projectPath)
+		os.Exit(1)
+	}
+	repoRoot := strings.TrimSpace(string(out))
+
+	// Get current branch
+	cmd = exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err = cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error detecting branch in %s: %v\n", projectPath, err)
+		os.Exit(1)
+	}
+	branch := strings.TrimSpace(string(out))
+
+	// Build worktree path
+	sanitizedBranch := strings.ReplaceAll(branch, "/", "-")
+	worktreePath := filepath.Join(repoRoot+"-worktrees", sanitizedBranch)
+
+	// Create worktree if it doesn't exist
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		fmt.Printf("Creating worktree at %s for branch %s...\n", worktreePath, branch)
+		cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-f", worktreePath, branch)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating worktree: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Printf("Reusing existing worktree at %s\n", worktreePath)
+	}
+
+	if err := os.Chdir(worktreePath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error changing to worktree %s: %v\n", worktreePath, err)
+		os.Exit(1)
+	}
+
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Starting new session in worktree %s...\n", worktreePath)
+
+	claudeArgs := []string{"claude"}
+	if skipPermissions {
+		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
+	}
+
 	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
