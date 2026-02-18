@@ -21,8 +21,9 @@ type Model struct {
 	width            int
 	height           int
 	showHelp         bool
-	chosen         bool // true when user pressed Enter to resume
-	fullTextSearch bool // true = search all message text, false = summary/project/branch only
+	chosen          bool // true when user pressed Enter to resume
+	fullTextSearch  bool // true = search all message text, false = summary/project/branch only
+	SkipPermissions bool // pass --dangerously-skip-permissions to claude
 }
 
 // NewModel creates a new TUI model with the given sessions.
@@ -149,6 +150,10 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < 0 {
 			m.cursor = 0
 		}
+		return m, nil
+
+	case "!":
+		m.SkipPermissions = !m.SkipPermissions
 		return m, nil
 
 	case "enter":
@@ -298,11 +303,14 @@ func (m Model) View() string {
 	if len(m.filteredSessions) != len(m.allSessions) {
 		status += fmt.Sprintf(" (of %d)", len(m.allSessions))
 	}
+	if m.SkipPermissions {
+		status += "  ⚡ skip-permissions"
+	}
 	b.WriteString(statusBarStyle.Width(m.width).Render(status))
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • / search (@repo to filter) • tab full-text • ? help • q quit"
+	help := "↑↓ navigate • enter resume • / search (@repo) • tab full-text • ! skip-perms • ? help • q quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -322,6 +330,7 @@ func (m Model) renderHelp() string {
 		{"Enter", "Resume selected session"},
 		{"/", "Search (@repo to filter by project)"},
 		{"Tab", "Toggle full-text search (in search mode)"},
+		{"!", "Toggle --dangerously-skip-permissions"},
 		{"Esc", "Clear search / close help"},
 		{"?", "Toggle help"},
 		{"q", "Quit"},

@@ -59,7 +59,7 @@ func runTUI() {
 		return
 	}
 
-	resumeSession(*selected)
+	resumeSession(*selected, final.SkipPermissions)
 }
 
 func runList() {
@@ -83,7 +83,7 @@ func runResume(sessionID string) {
 
 	for _, s := range ss {
 		if s.ID == sessionID {
-			resumeSession(s)
+			resumeSession(s, false)
 			return
 		}
 	}
@@ -92,7 +92,7 @@ func runResume(sessionID string) {
 	os.Exit(1)
 }
 
-func resumeSession(s sessions.Session) {
+func resumeSession(s sessions.Session, skipPermissions bool) {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
@@ -109,8 +109,14 @@ func resumeSession(s sessions.Session) {
 
 	fmt.Printf("Resuming session in %s...\n", s.ProjectPath)
 
+	// Build claude args
+	claudeArgs := []string{"claude", "-r", s.ID}
+	if skipPermissions {
+		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
+	}
+
 	// Replace this process with claude -r <session-id>
-	err = syscall.Exec(claudePath, []string{"claude", "-r", s.ID}, os.Environ())
+	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
 		os.Exit(1)
