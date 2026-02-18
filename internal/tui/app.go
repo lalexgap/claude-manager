@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"claude-manager/internal/sessions"
+	"claude-manager/internal/worktree"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,6 +26,11 @@ type Model struct {
 	chosen          bool // true when user pressed Enter to resume
 	fullTextSearch  bool // true = search all message text, false = summary/project/branch only
 	SkipPermissions bool // pass --dangerously-skip-permissions to claude
+	UseWorktree     bool // resume in a new git worktree
+	showWorktrees   bool
+	worktrees       []worktree.Entry
+	worktreeCursor  int
+	worktreeMsg     string // feedback after removal
 }
 
 // NewModel creates a new TUI model with the given sessions.
@@ -39,6 +46,29 @@ func NewModel(ss []sessions.Session) Model {
 	}
 }
 
+// Message types for worktree screen
+type worktreesLoadedMsg struct {
+	entries []worktree.Entry
+}
+
+type worktreeRemovedMsg struct {
+	idx int
+	err error
+}
+
+func discoverWorktreesCmd(ss []sessions.Session) tea.Cmd {
+	return func() tea.Msg {
+		return worktreesLoadedMsg{entries: worktree.Discover(ss)}
+	}
+}
+
+func removeWorktreeCmd(entries []worktree.Entry, idx int) tea.Cmd {
+	return func() tea.Msg {
+		err := worktree.Remove(entries[idx])
+		return worktreeRemovedMsg{idx: idx, err: err}
+	}
+}
+
 func (m Model) Init() tea.Cmd {
 	return tea.SetWindowTitle("claude-manager")
 }
@@ -50,7 +80,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 
+	case worktreesLoadedMsg:
+		m.worktrees = msg.entries
+		m.worktreeCursor = 0
+		m.worktreeMsg = ""
+		return m, nil
+
+	case worktreeRemovedMsg:
+		if msg.err != nil {
+			m.worktreeMsg = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.worktreeMsg = fmt.Sprintf("Removed %s", m.worktrees[msg.idx].Path)
+			m.worktrees = append(m.worktrees[:msg.idx], m.worktrees[msg.idx+1:]...)
+			if m.worktreeCursor >= len(m.worktrees) && m.worktreeCursor > 0 {
+				m.worktreeCursor--
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.showWorktrees {
+			return m.handleWorktreeKey(msg)
+		}
 		if m.searching {
 			return m.handleSearchKey(msg)
 		}
@@ -156,6 +207,15 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.SkipPermissions = !m.SkipPermissions
 		return m, nil
 
+	case "w":
+		m.UseWorktree = !m.UseWorktree
+		return m, nil
+
+	case "t":
+		m.showWorktrees = true
+		m.worktreeMsg = ""
+		return m, discoverWorktreesCmd(m.allSessions)
+
 	case "enter":
 		if len(m.filteredSessions) > 0 {
 			m.chosen = true
@@ -164,6 +224,37 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	return m, nil
+}
+
+func (m Model) handleWorktreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.showWorktrees = false
+		return m, nil
+
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	case "up", "k":
+		if m.worktreeCursor > 0 {
+			m.worktreeCursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.worktreeCursor < len(m.worktrees)-1 {
+			m.worktreeCursor++
+		}
+		return m, nil
+
+	case "d", "x":
+		if len(m.worktrees) > 0 && m.worktreeCursor < len(m.worktrees) {
+			m.worktreeMsg = fmt.Sprintf("Removing %s...", m.worktrees[m.worktreeCursor].Path)
+			return m, removeWorktreeCmd(m.worktrees, m.worktreeCursor)
+		}
+		return m, nil
+	}
 	return m, nil
 }
 
@@ -209,6 +300,10 @@ func (m Model) SelectedSession() *sessions.Session {
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Loading..."
+	}
+
+	if m.showWorktrees {
+		return m.renderWorktrees()
 	}
 
 	if m.showHelp {
@@ -303,6 +398,9 @@ func (m Model) View() string {
 	if len(m.filteredSessions) != len(m.allSessions) {
 		status += fmt.Sprintf(" (of %d)", len(m.allSessions))
 	}
+	if m.UseWorktree {
+		status += "  🌳 worktree"
+	}
 	if m.SkipPermissions {
 		status += "  ⚡ skip-permissions"
 	}
@@ -310,9 +408,58 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • / search (@repo) • tab full-text • ! skip-perms • ? help • q quit"
+	help := "↑↓ navigate • enter resume • w toggle worktree • t worktrees • / search • ! skip-perms • ? help • q quit"
 	b.WriteString(helpStyle.Render(help))
 
+	return b.String()
+}
+
+func (m Model) renderWorktrees() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Width(m.width).Render(" claude-manager — Worktrees"))
+	b.WriteString("\n\n")
+
+	if len(m.worktrees) == 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimText).Padding(1, 2).Render("No worktrees found"))
+		b.WriteString("\n")
+	} else {
+		listHeight := m.height - 6 // title + padding + help + msg
+		if listHeight < 3 {
+			listHeight = 3
+		}
+		start := 0
+		if m.worktreeCursor >= listHeight {
+			start = m.worktreeCursor - listHeight + 1
+		}
+		end := start + listHeight
+		if end > len(m.worktrees) {
+			end = len(m.worktrees)
+		}
+
+		for i := start; i < end; i++ {
+			e := m.worktrees[i]
+			repo := filepath.Base(e.RepoRoot)
+			line := fmt.Sprintf("%s  %s",
+				lipgloss.NewStyle().Foreground(highlight).Bold(true).Width(18).Render(repo),
+				lipgloss.NewStyle().Foreground(special).Render(e.Branch),
+			)
+			if i == m.worktreeCursor {
+				b.WriteString(selectedItemStyle.Render(line))
+			} else {
+				b.WriteString(itemStyle.Render(line))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if m.worktreeMsg != "" {
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(dimText).Padding(0, 2).Render(m.worktreeMsg))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("↑↓ navigate • d remove • Esc back • q quit"))
 	return b.String()
 }
 
@@ -328,6 +475,8 @@ func (m Model) renderHelp() string {
 		{"G/End", "Go to bottom"},
 		{"PgUp/PgDn", "Page up/down"},
 		{"Enter", "Resume selected session"},
+		{"w", "Toggle worktree mode"},
+		{"t", "Manage worktrees"},
 		{"/", "Search (@repo to filter by project)"},
 		{"Tab", "Toggle full-text search (in search mode)"},
 		{"!", "Toggle --dangerously-skip-permissions"},
