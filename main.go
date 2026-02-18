@@ -46,7 +46,8 @@ func loadSessions() []sessions.Session {
 
 func runTUI() {
 	ss := loadSessions()
-	m := tui.NewModel(ss)
+	cwd, _ := os.Getwd()
+	m := tui.NewModel(ss, cwd)
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	result, err := p.Run()
@@ -56,6 +57,12 @@ func runTUI() {
 	}
 
 	final := result.(tui.Model)
+
+	if path := final.NewSessionPath(); path != "" {
+		startNewSession(path, final.SkipPermissions)
+		return
+	}
+
 	selected := final.SelectedSession()
 	if selected == nil {
 		return
@@ -176,6 +183,32 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 	}
 
 	fmt.Printf("Resuming session in worktree %s...\n", worktreePath)
+	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func startNewSession(projectPath string, skipPermissions bool) {
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
+		os.Exit(1)
+	}
+
+	if err := os.Chdir(projectPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error changing to %s: %v\n", projectPath, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Starting new session in %s...\n", projectPath)
+
+	claudeArgs := []string{"claude"}
+	if skipPermissions {
+		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
+	}
+
 	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)

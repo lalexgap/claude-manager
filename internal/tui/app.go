@@ -24,6 +24,12 @@ type Model struct {
 	height           int
 	showHelp         bool
 	chosen          bool // true when user pressed Enter to resume
+	newSession      bool // true when user pressed n to start new session
+	newSessionPath  string // chosen project path for new session
+	showNewSession  bool
+	newSessionPaths []projectEntry
+	newSessionCursor int
+	cwd             string // working directory where claude-manager was launched
 	fullTextSearch  bool // true = search all message text, false = summary/project/branch only
 	SkipPermissions bool // pass --dangerously-skip-permissions to claude
 	UseWorktree     bool // resume in a new git worktree
@@ -33,8 +39,13 @@ type Model struct {
 	worktreeMsg     string // feedback after removal
 }
 
+type projectEntry struct {
+	Name string
+	Path string
+}
+
 // NewModel creates a new TUI model with the given sessions.
-func NewModel(ss []sessions.Session) Model {
+func NewModel(ss []sessions.Session, cwd string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Search... (@repo to filter by project)"
 	ti.CharLimit = 100
@@ -43,6 +54,7 @@ func NewModel(ss []sessions.Session) Model {
 		allSessions:      ss,
 		filteredSessions: ss,
 		search:           ti,
+		cwd:              cwd,
 	}
 }
 
@@ -99,6 +111,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.showNewSession {
+			return m.handleNewSessionKey(msg)
+		}
 		if m.showWorktrees {
 			return m.handleWorktreeKey(msg)
 		}
@@ -216,6 +231,12 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.worktreeMsg = ""
 		return m, discoverWorktreesCmd(m.allSessions)
 
+	case "n":
+		m.showNewSession = true
+		m.newSessionCursor = 0
+		m.newSessionPaths = m.buildProjectList()
+		return m, nil
+
 	case "enter":
 		if len(m.filteredSessions) > 0 {
 			m.chosen = true
@@ -258,6 +279,108 @@ func (m Model) handleWorktreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) buildProjectList() []projectEntry {
+	seen := map[string]bool{}
+	var entries []projectEntry
+
+	// Current directory first
+	if m.cwd != "" {
+		entries = append(entries, projectEntry{
+			Name: filepath.Base(m.cwd) + " (current dir)",
+			Path: m.cwd,
+		})
+		seen[m.cwd] = true
+	}
+
+	// Unique project paths from sessions, ordered by most recent
+	for _, s := range m.allSessions {
+		if s.ProjectPath == "" || seen[s.ProjectPath] {
+			continue
+		}
+		seen[s.ProjectPath] = true
+		entries = append(entries, projectEntry{
+			Name: s.Project,
+			Path: s.ProjectPath,
+		})
+	}
+
+	return entries
+}
+
+func (m Model) handleNewSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.showNewSession = false
+		return m, nil
+
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	case "up", "k":
+		if m.newSessionCursor > 0 {
+			m.newSessionCursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.newSessionCursor < len(m.newSessionPaths)-1 {
+			m.newSessionCursor++
+		}
+		return m, nil
+
+	case "enter":
+		if len(m.newSessionPaths) > 0 && m.newSessionCursor < len(m.newSessionPaths) {
+			m.newSession = true
+			m.newSessionPath = m.newSessionPaths[m.newSessionCursor].Path
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) renderNewSession() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Width(m.width).Render(" claude-manager — New Session"))
+	b.WriteString("\n\n")
+
+	if len(m.newSessionPaths) == 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimText).Padding(1, 2).Render("No projects found"))
+		b.WriteString("\n")
+	} else {
+		listHeight := m.height - 6
+		if listHeight < 3 {
+			listHeight = 3
+		}
+		start := 0
+		if m.newSessionCursor >= listHeight {
+			start = m.newSessionCursor - listHeight + 1
+		}
+		end := start + listHeight
+		if end > len(m.newSessionPaths) {
+			end = len(m.newSessionPaths)
+		}
+
+		for i := start; i < end; i++ {
+			e := m.newSessionPaths[i]
+			line := fmt.Sprintf("%s  %s",
+				lipgloss.NewStyle().Foreground(highlight).Bold(true).Width(24).Render(e.Name),
+				lipgloss.NewStyle().Foreground(dimText).Render(e.Path),
+			)
+			if i == m.newSessionCursor {
+				b.WriteString(selectedItemStyle.Render(line))
+			} else {
+				b.WriteString(itemStyle.Render(line))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("↑↓ navigate • enter select • Esc back • q quit"))
+	return b.String()
+}
+
 // parseQuery splits a search query into an optional @project prefix and remaining search text.
 // e.g. "@producthunt some query" -> ("producthunt", "some query")
 //      "just a query"            -> ("", "just a query")
@@ -297,9 +420,21 @@ func (m Model) SelectedSession() *sessions.Session {
 	return nil
 }
 
+// NewSessionPath returns the project path for the new session, or "" if not chosen.
+func (m Model) NewSessionPath() string {
+	if !m.newSession {
+		return ""
+	}
+	return m.newSessionPath
+}
+
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Loading..."
+	}
+
+	if m.showNewSession {
+		return m.renderNewSession()
 	}
 
 	if m.showWorktrees {
@@ -408,7 +543,7 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • w toggle worktree • t worktrees • / search • ! skip-perms • ? help • q quit"
+	help := "↑↓ navigate • enter resume • n new session • w worktree • t worktrees • / search • ! skip-perms • ? help • q quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -475,6 +610,7 @@ func (m Model) renderHelp() string {
 		{"G/End", "Go to bottom"},
 		{"PgUp/PgDn", "Page up/down"},
 		{"Enter", "Resume selected session"},
+		{"n", "New session (choose project)"},
 		{"w", "Toggle worktree mode"},
 		{"t", "Manage worktrees"},
 		{"/", "Search (@repo to filter by project)"},
