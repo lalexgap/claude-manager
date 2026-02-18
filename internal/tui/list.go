@@ -39,7 +39,8 @@ func renderSessionItem(s sessions.Session, width int, selected bool) string {
 }
 
 // filterSessions returns sessions matching the query (case-insensitive substring match).
-func filterSessions(all []sessions.Session, query string) []sessions.Session {
+// When fullText is true, also searches all user message text.
+func filterSessions(all []sessions.Session, query string, fullText bool) []sessions.Session {
 	if query == "" {
 		return all
 	}
@@ -49,6 +50,20 @@ func filterSessions(all []sessions.Session, query string) []sessions.Session {
 		if strings.Contains(strings.ToLower(s.Summary), q) ||
 			strings.Contains(strings.ToLower(s.Project), q) ||
 			strings.Contains(strings.ToLower(s.GitBranch), q) {
+			result = append(result, s)
+		} else if fullText && strings.Contains(strings.ToLower(s.MessageText), q) {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// filterByProject returns sessions whose project name contains the given substring.
+func filterByProject(all []sessions.Session, project string) []sessions.Session {
+	p := strings.ToLower(project)
+	var result []sessions.Session
+	for _, s := range all {
+		if strings.Contains(strings.ToLower(s.Project), p) {
 			result = append(result, s)
 		}
 	}

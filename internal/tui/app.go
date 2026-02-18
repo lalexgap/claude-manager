@@ -21,13 +21,14 @@ type Model struct {
 	width            int
 	height           int
 	showHelp         bool
-	chosen           bool // true when user pressed Enter to resume
+	chosen         bool // true when user pressed Enter to resume
+	fullTextSearch bool // true = search all message text, false = summary/project/branch only
 }
 
 // NewModel creates a new TUI model with the given sessions.
 func NewModel(ss []sessions.Session) Model {
 	ti := textinput.New()
-	ti.Placeholder = "Search sessions..."
+	ti.Placeholder = "Search... (@repo to filter by project)"
 	ti.CharLimit = 100
 
 	return Model{
@@ -64,8 +65,7 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searching = false
 		m.search.Blur()
 		m.search.SetValue("")
-		m.filteredSessions = m.allSessions
-		m.cursor = 0
+		m.applyFilters()
 		return m, nil
 
 	case "enter":
@@ -73,11 +73,15 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.search.Blur()
 		return m, nil
 
+	case "tab":
+		m.fullTextSearch = !m.fullTextSearch
+		m.applyFilters()
+		return m, nil
+
 	default:
 		var cmd tea.Cmd
 		m.search, cmd = m.search.Update(msg)
-		m.filteredSessions = filterSessions(m.allSessions, m.search.Value())
-		m.cursor = 0
+		m.applyFilters()
 		return m, cmd
 	}
 }
@@ -94,8 +98,7 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.search.Value() != "" {
 			m.search.SetValue("")
-			m.filteredSessions = m.allSessions
-			m.cursor = 0
+			m.applyFilters()
 			return m, nil
 		}
 		return m, tea.Quit
@@ -159,6 +162,33 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// parseQuery splits a search query into an optional @project prefix and remaining search text.
+// e.g. "@producthunt some query" -> ("producthunt", "some query")
+//      "just a query"            -> ("", "just a query")
+func parseQuery(raw string) (project, query string) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "@") {
+		return "", raw
+	}
+	// Split on first space after @project
+	rest := raw[1:] // strip @
+	if idx := strings.IndexByte(rest, ' '); idx >= 0 {
+		return rest[:idx], strings.TrimSpace(rest[idx+1:])
+	}
+	return rest, ""
+}
+
+// applyFilters re-applies @project filter + search query.
+func (m *Model) applyFilters() {
+	project, query := parseQuery(m.search.Value())
+	src := m.allSessions
+	if project != "" {
+		src = filterByProject(src, project)
+	}
+	m.filteredSessions = filterSessions(src, query, m.fullTextSearch)
+	m.cursor = 0
+}
+
 // SelectedSession returns the session the user picked via Enter, or nil if they quit.
 func (m Model) SelectedSession() *sessions.Session {
 	if !m.chosen {
@@ -188,15 +218,27 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Search bar
-	searchWidth := m.width - 4
-	if searchWidth < 10 {
-		searchWidth = 10
+	modeTag := ""
+	modeTagWidth := 0
+	if m.searching || m.search.Value() != "" {
+		if m.fullTextSearch {
+			modeTag = lipgloss.NewStyle().Foreground(special).Render(" [full-text]")
+		} else {
+			modeTag = lipgloss.NewStyle().Foreground(dimText).Render(" [quick]")
+		}
+		modeTagWidth = lipgloss.Width(modeTag)
 	}
-	m.search.Width = searchWidth
+	searchBoxWidth := m.width - 4 - modeTagWidth
+	if searchBoxWidth < 10 {
+		searchBoxWidth = 10
+	}
+	m.search.Width = searchBoxWidth - 4 // account for border + padding
 	if m.searching {
-		b.WriteString(searchActiveStyle.Width(m.width - 4).Render(m.search.View()))
+		searchBox := searchActiveStyle.Width(searchBoxWidth).Render(m.search.View())
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Center, searchBox, modeTag))
 	} else if m.search.Value() != "" {
-		b.WriteString(searchStyle.Width(m.width - 4).Render("🔍 " + m.search.Value()))
+		searchBox := searchStyle.Width(searchBoxWidth).Render("🔍 " + m.search.Value())
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Center, searchBox, modeTag))
 	} else {
 		b.WriteString(searchStyle.Width(m.width - 4).Render(lipgloss.NewStyle().Foreground(dimText).Render("/ to search")))
 	}
@@ -260,7 +302,7 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • / search • ? help • q quit"
+	help := "↑↓ navigate • enter resume • / search (@repo to filter) • tab full-text • ? help • q quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -278,7 +320,8 @@ func (m Model) renderHelp() string {
 		{"G/End", "Go to bottom"},
 		{"PgUp/PgDn", "Page up/down"},
 		{"Enter", "Resume selected session"},
-		{"/", "Search/filter sessions"},
+		{"/", "Search (@repo to filter by project)"},
+		{"Tab", "Toggle full-text search (in search mode)"},
 		{"Esc", "Clear search / close help"},
 		{"?", "Toggle help"},
 		{"q", "Quit"},

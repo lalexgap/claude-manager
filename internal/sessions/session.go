@@ -15,6 +15,7 @@ type Session struct {
 	LastActive   time.Time // Timestamp of last message
 	MessageCount int       // Total user + assistant messages
 	FilePath     string    // Path to the .jsonl file
+	MessageText  string    // Concatenated user message text for full-text search
 }
 
 // TimeAgo returns a human-readable relative time string.

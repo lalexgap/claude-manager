@@ -113,6 +113,7 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 
 	var firstUserMessage string
 	var lastTimestamp time.Time
+	var messageTexts []string
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
@@ -151,9 +152,15 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 				s.MessageCount++
 			}
 
-			// Capture first real user message as fallback summary
-			if entry.Type == "user" && !entry.IsMeta && firstUserMessage == "" {
-				firstUserMessage = extractTextContent(entry.Message)
+			// Capture user message text
+			if entry.Type == "user" && !entry.IsMeta {
+				text := extractTextContent(entry.Message)
+				if text != "" {
+					if firstUserMessage == "" {
+						firstUserMessage = text
+					}
+					messageTexts = append(messageTexts, text)
+				}
 			}
 		}
 	}
@@ -164,6 +171,7 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 	}
 
 	s.LastActive = lastTimestamp
+	s.MessageText = strings.Join(messageTexts, "\n")
 
 	if s.Summary == "" {
 		s.Summary = firstUserMessage
