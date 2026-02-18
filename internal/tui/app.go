@@ -328,6 +328,14 @@ func (m Model) handleNewSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "!":
+		m.SkipPermissions = !m.SkipPermissions
+		return m, nil
+
+	case "w":
+		m.UseWorktree = !m.UseWorktree
+		return m, nil
+
 	case "enter":
 		if len(m.newSessionPaths) > 0 && m.newSessionCursor < len(m.newSessionPaths) {
 			m.newSession = true
@@ -376,8 +384,21 @@ func (m Model) renderNewSession() string {
 		}
 	}
 
+	// Status indicators
+	var flags []string
+	if m.UseWorktree {
+		flags = append(flags, "🌳 worktree")
+	}
+	if m.SkipPermissions {
+		flags = append(flags, "⚡ skip-permissions")
+	}
+	if len(flags) > 0 {
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(dimText).Padding(0, 2).Render(strings.Join(flags, "  ")))
+	}
+
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑↓ navigate • enter select • Esc back • q quit"))
+	b.WriteString(helpStyle.Render("↑↓ navigate • enter select • ! skip-perms • w worktree • Esc back • q quit"))
 	return b.String()
 }
 
