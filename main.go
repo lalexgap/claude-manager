@@ -16,17 +16,29 @@ import (
 )
 
 func main() {
-	args := os.Args[1:]
+	// Parse flags: "!" for skip-permissions, "w" for worktree mode
+	var skipPerms, useWorktree bool
+	var rest []string
+	for _, a := range os.Args[1:] {
+		switch a {
+		case "!":
+			skipPerms = true
+		case "w":
+			useWorktree = true
+		default:
+			rest = append(rest, a)
+		}
+	}
 
 	switch {
-	case len(args) == 0:
-		runTUI()
-	case args[0] == "list":
+	case len(rest) == 0:
+		runTUI(skipPerms, useWorktree)
+	case rest[0] == "list":
 		runList()
-	case args[0] == "resume" && len(args) >= 2:
-		runResume(args[1])
+	case rest[0] == "resume" && len(rest) >= 2:
+		runResume(rest[1])
 	default:
-		fmt.Fprintf(os.Stderr, "Usage: claude-manager [list | resume <session-id>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: claude-manager [! w] [list | resume <session-id>]\n")
 		os.Exit(1)
 	}
 }
@@ -44,10 +56,12 @@ func loadSessions() []sessions.Session {
 	return ss
 }
 
-func runTUI() {
+func runTUI(skipPerms, useWorktree bool) {
 	ss := loadSessions()
 	cwd, _ := os.Getwd()
 	m := tui.NewModel(ss, cwd)
+	m.SkipPermissions = skipPerms
+	m.UseWorktree = useWorktree
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	result, err := p.Run()
