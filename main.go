@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"text/tabwriter"
 	"unicode/utf8"
 
+	"github.com/lalexgap/claude-manager/internal/orchestrator"
 	"github.com/lalexgap/claude-manager/internal/sessions"
 	"github.com/lalexgap/claude-manager/internal/tui"
 
@@ -24,10 +26,25 @@ func main() {
 		runList()
 	case args[0] == "resume" && len(args) >= 2:
 		runResume(args[1])
+	case args[0] == "orchestrator":
+		runOrchestrator(args[1:])
+	case args[0] == "agent":
+		runAgent(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "Usage: claude-manager [list | resume <session-id>]\n")
+		printUsage()
 		os.Exit(1)
 	}
+}
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  claude-manager")
+	fmt.Fprintln(os.Stderr, "  claude-manager list")
+	fmt.Fprintln(os.Stderr, "  claude-manager resume <session-id>")
+	fmt.Fprintln(os.Stderr, "  claude-manager orchestrator init")
+	fmt.Fprintln(os.Stderr, "  claude-manager orchestrator status")
+	fmt.Fprintln(os.Stderr, "  claude-manager agent add <name> <workspace>")
+	fmt.Fprintln(os.Stderr, "  claude-manager agent list")
 }
 
 func loadSessions() []sessions.Session {
@@ -95,6 +112,91 @@ func runResume(sessionID string) {
 
 	fmt.Fprintf(os.Stderr, "Session not found: %s\n", sessionID)
 	os.Exit(1)
+}
+
+func runOrchestrator(args []string) {
+	store, err := orchestrator.NewStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager orchestrator [init | status]")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "init":
+		if err := store.Init(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing orchestrator database: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Initialized orchestrator database at %s\n", store.DBPath())
+	case "status":
+		status, err := store.Status()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading orchestrator status: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Initialized: %t\n", status.Initialized)
+		fmt.Printf("DB Path: %s\n", status.DBPath)
+		fmt.Printf("Agents: %d\n", status.AgentCount)
+		fmt.Printf("Events: %d\n", status.EventCount)
+	default:
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager orchestrator [init | status]")
+		os.Exit(1)
+	}
+}
+
+func runAgent(args []string) {
+	store, err := orchestrator.NewStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list]")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "add":
+		if len(args) != 3 {
+			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent add <name> <workspace>")
+			os.Exit(1)
+		}
+		agent, err := store.AddAgent(args[1], args[2])
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error adding agent: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Added agent %q (id=%d)\n", agent.Name, agent.ID)
+	case "list":
+		agents, err := store.ListAgents()
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error listing agents: %v\n", err)
+			os.Exit(1)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tNAME\tSTATUS\tWORKSPACE\tUPDATED_AT")
+		for _, a := range agents {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", a.ID, a.Name, a.Status, a.WorkspacePath, a.UpdatedAt)
+		}
+		w.Flush()
+	default:
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list]")
+		os.Exit(1)
+	}
 }
 
 func startNewSession(projectPath string, skipPermissions bool, useWorktree bool) {

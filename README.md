@@ -29,6 +29,22 @@ claude-manager list
 claude-manager resume <session-id>
 ```
 
+## Experimental Orchestrator Commands
+
+```sh
+# Initialize orchestrator SQLite state
+claude-manager orchestrator init
+
+# Show orchestrator status (initialized + counts + db path)
+claude-manager orchestrator status
+
+# Register an agent
+claude-manager agent add <name> <workspace>
+
+# List registered agents
+claude-manager agent list
+```
+
 ## Keybindings
 
 | Key | Action |
