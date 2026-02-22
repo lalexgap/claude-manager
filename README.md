@@ -43,6 +43,24 @@ claude-manager agent add <name> <workspace>
 
 # List registered agents
 claude-manager agent list
+
+# Show main environment lease + queue depth
+claude-manager mainenv status
+
+# Queue a main environment request for an agent
+claude-manager mainenv request <agent-name> <request-type> [payload-json]
+
+# Show queued + running main environment requests
+claude-manager mainenv queue
+
+# Grant oldest queued request (defaults: mode=normal, ttl=10m)
+claude-manager mainenv grant-next [mode] [ttl]
+
+# Release current lease
+claude-manager mainenv release [success|failed] [result-json]
+
+# Force-reclaim an expired lease
+claude-manager mainenv reclaim-stale
 ```
 
 ## Keybindings
