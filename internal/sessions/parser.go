@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // jsonlEntry represents a single line in a session JSONL file.
@@ -55,6 +56,17 @@ func decodeProjectName(dirName string) string {
 		}
 	}
 	return dirName
+}
+
+func projectNameFromCWD(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	base := filepath.Base(filepath.Clean(cwd))
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return ""
+	}
+	return base
 }
 
 // LoadAll discovers and parses all session files.
@@ -113,6 +125,7 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 
 	var firstUserMessage string
 	var lastTimestamp time.Time
+	var hasTimestamp bool
 	var messageTexts []string
 
 	scanner := bufio.NewScanner(f)
@@ -136,6 +149,9 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 			}
 			if entry.CWD != "" {
 				s.ProjectPath = entry.CWD
+				if name := projectNameFromCWD(entry.CWD); name != "" {
+					s.Project = name
+				}
 			}
 			if entry.GitBranch != "" {
 				s.GitBranch = entry.GitBranch
@@ -145,6 +161,7 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 					if t.After(lastTimestamp) {
 						lastTimestamp = t
 					}
+					hasTimestamp = true
 				}
 			}
 
@@ -164,13 +181,23 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 
 	// Skip sessions with no messages
 	if s.ID == "" || s.MessageCount == 0 {
 		return nil, nil
 	}
 
-	s.LastActive = lastTimestamp
+	if hasTimestamp {
+		s.LastActive = lastTimestamp
+	} else {
+		info, err := os.Stat(path)
+		if err == nil {
+			s.LastActive = info.ModTime()
+		}
+	}
 	s.MessageText = strings.Join(messageTexts, "\n")
 
 	if s.Summary == "" {
@@ -181,8 +208,9 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 	s.Summary = strings.Join(strings.Fields(s.Summary), " ")
 
 	// Truncate long summaries
-	if len(s.Summary) > 200 {
-		s.Summary = s.Summary[:197] + "..."
+	if utf8.RuneCountInString(s.Summary) > 200 {
+		r := []rune(s.Summary)
+		s.Summary = string(r[:197]) + "..."
 	}
 
 	return s, nil

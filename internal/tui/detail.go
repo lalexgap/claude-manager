@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	"claude-manager/internal/sessions"
+	"github.com/lalexgap/claude-manager/internal/sessions"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -27,7 +27,7 @@ func renderDetail(s sessions.Session, width, height int) string {
 		row("Project:", s.Project),
 		row("Path:", s.ProjectPath),
 		row("Branch:", s.GitBranch),
-		row("Last active:", s.LastActive.Local().Format("Jan 2 15:04") + " (" + s.TimeAgo() + ")"),
+		row("Last active:", s.LastActive.Local().Format("Jan 2 15:04")+" ("+s.TimeAgo()+")"),
 		row("Messages:", fmt.Sprintf("%d", s.MessageCount)),
 		row("Session ID:", s.ID),
 	}

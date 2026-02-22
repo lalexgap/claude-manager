@@ -5,8 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"claude-manager/internal/sessions"
-	"claude-manager/internal/worktree"
+	"github.com/lalexgap/claude-manager/internal/sessions"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,20 +22,17 @@ type Model struct {
 	width            int
 	height           int
 	showHelp         bool
-	chosen          bool // true when user pressed Enter to resume
-	newSession      bool // true when user pressed n to start new session
-	newSessionPath  string // chosen project path for new session
-	showNewSession  bool
-	newSessionPaths []projectEntry
+	chosen           bool   // true when user pressed Enter to resume
+	newSession       bool   // true when user pressed n to start new session
+	newSessionPath   string // chosen project path for new session
+	showNewSession   bool
+	newSessionPaths  []projectEntry
 	newSessionCursor int
-	cwd             string // working directory where claude-manager was launched
-	fullTextSearch  bool // true = search all message text, false = summary/project/branch only
-	SkipPermissions bool // pass --dangerously-skip-permissions to claude
-	UseWorktree     bool // resume in a new git worktree
-	showWorktrees   bool
-	worktrees       []worktree.Entry
-	worktreeCursor  int
-	worktreeMsg     string // feedback after removal
+	cwd              string // working directory where claude-manager was launched
+	fullTextSearch   bool   // true = search all message text, false = summary/project/branch only
+	SkipPermissions  bool   // pass --dangerously-skip-permissions to claude
+	UseWorktree      bool   // pass --worktree to claude for resume/new session
+	showWorktrees    bool   // shows built-in worktree info
 }
 
 type projectEntry struct {
@@ -58,29 +54,6 @@ func NewModel(ss []sessions.Session, cwd string) Model {
 	}
 }
 
-// Message types for worktree screen
-type worktreesLoadedMsg struct {
-	entries []worktree.Entry
-}
-
-type worktreeRemovedMsg struct {
-	idx int
-	err error
-}
-
-func discoverWorktreesCmd(ss []sessions.Session) tea.Cmd {
-	return func() tea.Msg {
-		return worktreesLoadedMsg{entries: worktree.Discover(ss)}
-	}
-}
-
-func removeWorktreeCmd(entries []worktree.Entry, idx int) tea.Cmd {
-	return func() tea.Msg {
-		err := worktree.Remove(entries[idx])
-		return worktreeRemovedMsg{idx: idx, err: err}
-	}
-}
-
 func (m Model) Init() tea.Cmd {
 	return tea.SetWindowTitle("claude-manager")
 }
@@ -90,24 +63,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
-
-	case worktreesLoadedMsg:
-		m.worktrees = msg.entries
-		m.worktreeCursor = 0
-		m.worktreeMsg = ""
-		return m, nil
-
-	case worktreeRemovedMsg:
-		if msg.err != nil {
-			m.worktreeMsg = fmt.Sprintf("Error: %v", msg.err)
-		} else {
-			m.worktreeMsg = fmt.Sprintf("Removed %s", m.worktrees[msg.idx].Path)
-			m.worktrees = append(m.worktrees[:msg.idx], m.worktrees[msg.idx+1:]...)
-			if m.worktreeCursor >= len(m.worktrees) && m.worktreeCursor > 0 {
-				m.worktreeCursor--
-			}
-		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -228,8 +183,7 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "t":
 		m.showWorktrees = true
-		m.worktreeMsg = ""
-		return m, discoverWorktreesCmd(m.allSessions)
+		return m, nil
 
 	case "n":
 		m.showNewSession = true
@@ -256,25 +210,6 @@ func (m Model) handleWorktreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "q", "ctrl+c":
 		return m, tea.Quit
-
-	case "up", "k":
-		if m.worktreeCursor > 0 {
-			m.worktreeCursor--
-		}
-		return m, nil
-
-	case "down", "j":
-		if m.worktreeCursor < len(m.worktrees)-1 {
-			m.worktreeCursor++
-		}
-		return m, nil
-
-	case "d", "x":
-		if len(m.worktrees) > 0 && m.worktreeCursor < len(m.worktrees) {
-			m.worktreeMsg = fmt.Sprintf("Removing %s...", m.worktrees[m.worktreeCursor].Path)
-			return m, removeWorktreeCmd(m.worktrees, m.worktreeCursor)
-		}
-		return m, nil
 	}
 	return m, nil
 }
@@ -404,7 +339,8 @@ func (m Model) renderNewSession() string {
 
 // parseQuery splits a search query into an optional @project prefix and remaining search text.
 // e.g. "@producthunt some query" -> ("producthunt", "some query")
-//      "just a query"            -> ("", "just a query")
+//
+//	"just a query"            -> ("", "just a query")
 func parseQuery(raw string) (project, query string) {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, "@") {
@@ -564,7 +500,7 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • n new session • w worktree • t worktrees • / search • ! skip-perms • ? help • q quit"
+	help := "↑↓ navigate • enter resume • n new session • w worktree • t worktree info • / search • ! skip-perms • ? help • q quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -572,50 +508,24 @@ func (m Model) View() string {
 
 func (m Model) renderWorktrees() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Width(m.width).Render(" claude-manager — Worktrees"))
+	b.WriteString(titleStyle.Width(m.width).Render(" claude-manager — Worktree Mode"))
 	b.WriteString("\n\n")
 
-	if len(m.worktrees) == 0 {
-		b.WriteString(lipgloss.NewStyle().Foreground(dimText).Padding(1, 2).Render("No worktrees found"))
-		b.WriteString("\n")
-	} else {
-		listHeight := m.height - 6 // title + padding + help + msg
-		if listHeight < 3 {
-			listHeight = 3
-		}
-		start := 0
-		if m.worktreeCursor >= listHeight {
-			start = m.worktreeCursor - listHeight + 1
-		}
-		end := start + listHeight
-		if end > len(m.worktrees) {
-			end = len(m.worktrees)
-		}
-
-		for i := start; i < end; i++ {
-			e := m.worktrees[i]
-			repo := filepath.Base(e.RepoRoot)
-			line := fmt.Sprintf("%s  %s",
-				lipgloss.NewStyle().Foreground(highlight).Bold(true).Width(18).Render(repo),
-				lipgloss.NewStyle().Foreground(special).Render(e.Branch),
-			)
-			if i == m.worktreeCursor {
-				b.WriteString(selectedItemStyle.Render(line))
-			} else {
-				b.WriteString(itemStyle.Render(line))
-			}
-			b.WriteString("\n")
-		}
+	lines := []string{
+		"Worktree mode now uses Claude Code built-in support.",
+		"",
+		"When enabled (w), claude-manager starts Claude with --worktree.",
+		"Claude creates/manages the worktree automatically for new or resumed sessions.",
+		"",
+		"claude-manager no longer creates git worktrees or session symlinks itself.",
 	}
-
-	if m.worktreeMsg != "" {
-		b.WriteString("\n")
-		b.WriteString(lipgloss.NewStyle().Foreground(dimText).Padding(0, 2).Render(m.worktreeMsg))
+	for _, line := range lines {
+		b.WriteString(lipgloss.NewStyle().Foreground(white).Padding(0, 2).Render(line))
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑↓ navigate • d remove • Esc back • q quit"))
+	b.WriteString(helpStyle.Render("Esc back • q quit"))
 	return b.String()
 }
 
@@ -632,8 +542,8 @@ func (m Model) renderHelp() string {
 		{"PgUp/PgDn", "Page up/down"},
 		{"Enter", "Resume selected session"},
 		{"n", "New session (choose project)"},
-		{"w", "Toggle worktree mode"},
-		{"t", "Manage worktrees"},
+		{"w", "Toggle Claude --worktree mode"},
+		{"t", "Show worktree mode info"},
 		{"/", "Search (@repo to filter by project)"},
 		{"Tab", "Toggle full-text search (in search mode)"},
 		{"!", "Toggle --dangerously-skip-permissions"},

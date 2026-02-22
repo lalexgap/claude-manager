@@ -39,12 +39,21 @@ claude-manager resume <session-id>
 | `G`/`End` | Go to bottom |
 | `PgUp`/`PgDn` | Page up/down |
 | `Enter` | Resume selected session |
+| `n` | Start a new session (choose project) |
+| `w` | Toggle Claude `--worktree` mode for resume/new session |
+| `t` | Show worktree mode info |
 | `/` | Search (use `@repo` to filter by project) |
 | `Tab` | Toggle full-text search (in search mode) |
 | `!` | Toggle `--dangerously-skip-permissions` |
 | `Esc` | Clear search / close help |
 | `?` | Toggle help |
 | `q` | Quit |
+
+## Worktree mode
+
+When worktree mode is enabled (`w`), claude-manager calls Claude Code with `--worktree` and lets Claude manage worktree creation/selection.
+
+claude-manager no longer creates git worktrees or session symlinks directly.
 
 ## Search
 
@@ -58,3 +67,10 @@ Type `/` to open search, then:
 
 - macOS (Apple Silicon & Intel)
 - Linux (amd64 & arm64)
+
+## vNext planning docs
+
+- `docs/vnext/OVERVIEW.md`
+- `docs/vnext/ARCHITECTURE.md`
+- `docs/vnext/TUI_OPERATOR_FLOWS.md`
+- `docs/vnext/ROADMAP.md`

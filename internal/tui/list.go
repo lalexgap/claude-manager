@@ -3,8 +3,9 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
-	"claude-manager/internal/sessions"
+	"github.com/lalexgap/claude-manager/internal/sessions"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -71,11 +72,15 @@ func filterByProject(all []sessions.Session, project string) []sessions.Session 
 }
 
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
+	r := []rune(s)
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return string(r[:maxLen])
 	}
-	return s[:maxLen-3] + "..."
+	return string(r[:maxLen-3]) + "..."
 }

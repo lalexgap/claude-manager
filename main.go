@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"text/tabwriter"
+	"unicode/utf8"
 
-	"claude-manager/internal/sessions"
-	"claude-manager/internal/tui"
+	"github.com/lalexgap/claude-manager/internal/sessions"
+	"github.com/lalexgap/claude-manager/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -59,11 +58,7 @@ func runTUI() {
 	final := result.(tui.Model)
 
 	if path := final.NewSessionPath(); path != "" {
-		if final.UseWorktree {
-			worktreeNewSession(path, final.SkipPermissions)
-		} else {
-			startNewSession(path, final.SkipPermissions)
-		}
+		startNewSession(path, final.SkipPermissions, final.UseWorktree)
 		return
 	}
 
@@ -72,11 +67,7 @@ func runTUI() {
 		return
 	}
 
-	if final.UseWorktree {
-		worktreeResume(*selected, final.SkipPermissions)
-	} else {
-		resumeSession(*selected, final.SkipPermissions)
-	}
+	resumeSession(*selected, final.SkipPermissions, final.UseWorktree)
 }
 
 func runList() {
@@ -85,10 +76,7 @@ func runList() {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "PROJECT\tSUMMARY\tBRANCH\tLAST ACTIVE\tSESSION ID")
 	for _, s := range ss {
-		summary := s.Summary
-		if len(summary) > 60 {
-			summary = summary[:57] + "..."
-		}
+		summary := truncateRunes(s.Summary, 60)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			s.Project, summary, s.GitBranch, s.TimeAgo(), s.ID)
 	}
@@ -100,7 +88,7 @@ func runResume(sessionID string) {
 
 	for _, s := range ss {
 		if s.ID == sessionID {
-			resumeSession(s, false)
+			resumeSession(s, false, false)
 			return
 		}
 	}
@@ -109,154 +97,7 @@ func runResume(sessionID string) {
 	os.Exit(1)
 }
 
-func worktreeResume(s sessions.Session, skipPermissions bool) {
-	if s.GitBranch == "" {
-		fmt.Fprintln(os.Stderr, "Error: session has no git branch — cannot create worktree")
-		os.Exit(1)
-	}
-
-	projectPath := s.ProjectPath
-	if projectPath == "" {
-		fmt.Fprintln(os.Stderr, "Error: session has no project path")
-		os.Exit(1)
-	}
-
-	// Find git repo root
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding git root for %s: %v\n", projectPath, err)
-		os.Exit(1)
-	}
-	repoRoot := strings.TrimSpace(string(out))
-
-	// Build worktree path: <repoRoot>-worktrees/<sanitized-branch>/
-	sanitizedBranch := strings.ReplaceAll(s.GitBranch, "/", "-")
-	worktreePath := filepath.Join(repoRoot+"-worktrees", sanitizedBranch)
-
-	// Create worktree if it doesn't exist
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		fmt.Printf("Creating worktree at %s for branch %s...\n", worktreePath, s.GitBranch)
-		cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-f", worktreePath, s.GitBranch)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating worktree: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		fmt.Printf("Reusing existing worktree at %s\n", worktreePath)
-	}
-
-	// Symlink the session file so Claude can find it from the worktree path.
-	// Claude stores sessions in ~/.claude/projects/<encoded-path>/ where the
-	// encoded path replaces "/" with "-". The worktree has a different path
-	// than the original repo, so we need to link the session file over.
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding home dir: %v\n", err)
-		os.Exit(1)
-	}
-	worktreeEncoded := strings.ReplaceAll(worktreePath, "/", "-")
-	worktreeProjectDir := filepath.Join(homeDir, ".claude", "projects", worktreeEncoded)
-	if err := os.MkdirAll(worktreeProjectDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating project dir: %v\n", err)
-		os.Exit(1)
-	}
-	sessionFileName := filepath.Base(s.FilePath)
-	symlinkPath := filepath.Join(worktreeProjectDir, sessionFileName)
-	if _, err := os.Lstat(symlinkPath); os.IsNotExist(err) {
-		os.Symlink(s.FilePath, symlinkPath)
-	}
-
-	// Chdir into worktree and exec claude
-	if err := os.Chdir(worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error changing to worktree %s: %v\n", worktreePath, err)
-		os.Exit(1)
-	}
-
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
-		os.Exit(1)
-	}
-
-	claudeArgs := []string{"claude", "-r", s.ID}
-	if skipPermissions {
-		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
-	}
-
-	fmt.Printf("Resuming session in worktree %s...\n", worktreePath)
-	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func worktreeNewSession(projectPath string, skipPermissions bool) {
-	// Find git repo root
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s is not a git repository\n", projectPath)
-		os.Exit(1)
-	}
-	repoRoot := strings.TrimSpace(string(out))
-
-	// Get current branch
-	cmd = exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err = cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting branch in %s: %v\n", projectPath, err)
-		os.Exit(1)
-	}
-	branch := strings.TrimSpace(string(out))
-
-	// Build worktree path
-	sanitizedBranch := strings.ReplaceAll(branch, "/", "-")
-	worktreePath := filepath.Join(repoRoot+"-worktrees", sanitizedBranch)
-
-	// Create worktree if it doesn't exist
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		fmt.Printf("Creating worktree at %s for branch %s...\n", worktreePath, branch)
-		cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-f", worktreePath, branch)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating worktree: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		fmt.Printf("Reusing existing worktree at %s\n", worktreePath)
-	}
-
-	if err := os.Chdir(worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error changing to worktree %s: %v\n", worktreePath, err)
-		os.Exit(1)
-	}
-
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
-		os.Exit(1)
-	}
-
-	fmt.Printf("Starting new session in worktree %s...\n", worktreePath)
-
-	claudeArgs := []string{"claude"}
-	if skipPermissions {
-		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
-	}
-
-	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func startNewSession(projectPath string, skipPermissions bool) {
+func startNewSession(projectPath string, skipPermissions bool, useWorktree bool) {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
@@ -271,6 +112,9 @@ func startNewSession(projectPath string, skipPermissions bool) {
 	fmt.Printf("Starting new session in %s...\n", projectPath)
 
 	claudeArgs := []string{"claude"}
+	if useWorktree {
+		claudeArgs = append(claudeArgs, "--worktree")
+	}
 	if skipPermissions {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}
@@ -282,7 +126,7 @@ func startNewSession(projectPath string, skipPermissions bool) {
 	}
 }
 
-func resumeSession(s sessions.Session, skipPermissions bool) {
+func resumeSession(s sessions.Session, skipPermissions bool, useWorktree bool) {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
@@ -301,6 +145,9 @@ func resumeSession(s sessions.Session, skipPermissions bool) {
 
 	// Build claude args
 	claudeArgs := []string{"claude", "-r", s.ID}
+	if useWorktree {
+		claudeArgs = append(claudeArgs, "--worktree")
+	}
 	if skipPermissions {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}
@@ -311,4 +158,18 @@ func resumeSession(s sessions.Session, skipPermissions bool) {
 		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func truncateRunes(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return string([]rune(s)[:maxLen])
+	}
+	r := []rune(s)
+	return string(r[:maxLen-3]) + "..."
 }

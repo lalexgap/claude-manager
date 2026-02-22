@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"claude-manager/internal/sessions"
+	"github.com/lalexgap/claude-manager/internal/sessions"
 )
 
 // Entry represents a single git worktree directory.
