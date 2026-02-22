@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -53,6 +54,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv request <agent-name> <request-type> [payload-json]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv queue")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv grant-next [mode] [ttl]")
+	fmt.Fprintln(os.Stderr, "  claude-manager mainenv run-next [mode] [ttl]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv release [success|failed] [result-json]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv reclaim-stale")
 }
@@ -217,7 +219,7 @@ func runMainEnv(args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | release [success|failed] [result-json] | reclaim-stale]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | run-next [mode] [ttl] | release [success|failed] [result-json] | reclaim-stale]")
 		os.Exit(1)
 	}
 
@@ -289,25 +291,9 @@ func runMainEnv(args []string) {
 		}
 		w.Flush()
 	case "grant-next":
-		mode := "normal"
-		ttl := 10 * time.Minute
-		if len(args) >= 2 {
-			mode = strings.TrimSpace(args[1])
-		}
-		if len(args) >= 3 {
-			parsedTTL, err := time.ParseDuration(args[2])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Invalid ttl %q: %v\n", args[2], err)
-				os.Exit(1)
-			}
-			ttl = parsedTTL
-		}
-		if len(args) > 3 {
-			fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv grant-next [mode] [ttl]")
-			os.Exit(1)
-		}
-		if mode != "normal" && mode != "demo" {
-			fmt.Fprintln(os.Stderr, "Mode must be one of: normal, demo")
+		mode, ttl, err := parseMainEnvGrantArgs(args[1:], "grant-next")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		req, err := store.GrantNextMainEnv(mode, ttl)
@@ -324,6 +310,53 @@ func runMainEnv(args []string) {
 			return
 		}
 		fmt.Printf("Granted request id=%d to agent %q in mode=%s ttl=%s\n", req.ID, req.AgentName, mode, ttl)
+	case "run-next":
+		mode, ttl, err := parseMainEnvGrantArgs(args[1:], "run-next")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		cfg, err := orchestrator.LoadGatewayConfig("")
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrGatewayConfigNotFound) {
+				fmt.Fprintf(os.Stderr, "%v\nCreate the gateway config file and retry.\n", err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error loading gateway config: %v\n", err)
+			os.Exit(1)
+		}
+
+		req, err := store.GrantNextMainEnv(mode, ttl)
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error granting next main environment request: %v\n", err)
+			os.Exit(1)
+		}
+		if req == nil {
+			fmt.Println("No queued main environment requests.")
+			return
+		}
+
+		result := orchestrator.ExecuteMainEnvRequest(*req, cfg)
+		resultJSON, _ := json.Marshal(result)
+		releaseErr := store.ReleaseMainEnv(string(resultJSON), !result.Success)
+		if releaseErr != nil {
+			fmt.Fprintf(os.Stderr, "Request executed but failed to release lease cleanly: %v\n", releaseErr)
+			os.Exit(1)
+		}
+
+		if result.Success {
+			fmt.Printf("Executed request id=%d (%s) for agent %q successfully (exit=%d).\n", req.ID, req.RequestType, req.AgentName, result.ExitCode)
+			return
+		}
+		fmt.Printf("Executed request id=%d (%s) for agent %q but it failed (exit=%d).\n", req.ID, req.RequestType, req.AgentName, result.ExitCode)
+		if result.Error != "" {
+			fmt.Printf("Error: %s\n", result.Error)
+		}
+		os.Exit(1)
 	case "release":
 		markFailed := false
 		result := ""
@@ -374,9 +407,33 @@ func runMainEnv(args []string) {
 		}
 		fmt.Println("No stale main environment lease found.")
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | release [success|failed] [result-json] | reclaim-stale]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | run-next [mode] [ttl] | release [success|failed] [result-json] | reclaim-stale]")
 		os.Exit(1)
 	}
+}
+
+func parseMainEnvGrantArgs(args []string, commandName string) (string, time.Duration, error) {
+	mode := "normal"
+	ttl := 10 * time.Minute
+
+	if len(args) >= 1 {
+		mode = strings.TrimSpace(args[0])
+	}
+	if len(args) >= 2 {
+		parsedTTL, err := time.ParseDuration(args[1])
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid ttl %q: %w", args[1], err)
+		}
+		ttl = parsedTTL
+	}
+	if len(args) > 2 {
+		return "", 0, fmt.Errorf("usage: claude-manager mainenv %s [mode] [ttl]", commandName)
+	}
+	if mode != "normal" && mode != "demo" {
+		return "", 0, fmt.Errorf("mode must be one of: normal, demo")
+	}
+
+	return mode, ttl, nil
 }
 
 func startNewSession(projectPath string, skipPermissions bool, useWorktree bool) {

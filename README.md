@@ -48,6 +48,7 @@ claude-manager agent list
 claude-manager mainenv status
 
 # Queue a main environment request for an agent
+# request-type: run_feature_specs | dev_server
 claude-manager mainenv request <agent-name> <request-type> [payload-json]
 
 # Show queued + running main environment requests
@@ -56,12 +57,41 @@ claude-manager mainenv queue
 # Grant oldest queued request (defaults: mode=normal, ttl=10m)
 claude-manager mainenv grant-next [mode] [ttl]
 
+# Grant + execute oldest queued request via gateway commands
+claude-manager mainenv run-next [mode] [ttl]
+
 # Release current lease
 claude-manager mainenv release [success|failed] [result-json]
 
 # Force-reclaim an expired lease
 claude-manager mainenv reclaim-stale
 ```
+
+`mainenv run-next` reads gateway config from:
+
+`~/.claude/claude-manager/mainenv.json`
+
+Example:
+
+```json
+{
+  "workdir": "~/code/your-main-repo",
+  "default_timeout_seconds": 1200,
+  "commands": {
+    "run_feature_specs": ["pnpm", "test:features"],
+    "dev_server": {
+      "start": ["pnpm", "dev"],
+      "stop": ["pkill", "-f", "vite"],
+      "restart": ["sh", "-lc", "pkill -f vite || true; pnpm dev"],
+      "status": ["sh", "-lc", "lsof -i :3000"],
+      "logs": ["sh", "-lc", "tail -n 200 ./dev.log"]
+    }
+  }
+}
+```
+
+For `dev_server` requests, pass payload json like:
+`{"action":"start"}` (`start|stop|restart|status|logs`).
 
 ## Keybindings
 

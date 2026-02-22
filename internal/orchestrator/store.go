@@ -188,6 +188,9 @@ func (s *Store) RequestMainEnv(agentName, requestType, payloadJSON, reason strin
 	if requestType == "" {
 		return req, fmt.Errorf("request type is required")
 	}
+	if requestType != "run_feature_specs" && requestType != "dev_server" {
+		return req, fmt.Errorf("unsupported request type %q (allowed: run_feature_specs, dev_server)", requestType)
+	}
 
 	db, err := s.openInitializedDB()
 	if err != nil {

@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-const defaultRelativeDBPath = ".claude/claude-manager/orchestrator.db"
+const (
+	defaultRelativeDBPath            = ".claude/claude-manager/orchestrator.db"
+	defaultRelativeGatewayConfigPath = ".claude/claude-manager/mainenv.json"
+)
 
 func DefaultDBPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -15,6 +18,14 @@ func DefaultDBPath() (string, error) {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 	return filepath.Join(home, defaultRelativeDBPath), nil
+}
+
+func DefaultGatewayConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, defaultRelativeGatewayConfigPath), nil
 }
 
 func ExpandPath(path string) (string, error) {
