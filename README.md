@@ -29,7 +29,7 @@ claude-manager list
 claude-manager resume <session-id>
 ```
 
-When you start or resume a session from the TUI, exiting Claude drops you back into the TUI so you can jump to another session.
+When you start or resume a session from the main TUI screen, cm launches/attaches a tmux-backed agent session. Detaching (`Ctrl+b`, then `d`) drops you back into the TUI so you can jump to another session.
 
 ## Experimental Orchestrator Commands
 
@@ -46,7 +46,7 @@ claude-manager agent add <name> <workspace>
 # List registered agents
 claude-manager agent list
 
-# Start an agent runtime process in its workspace
+# Start an agent in a tmux session in its workspace
 # default command: claude
 claude-manager agent start <name> [command ...]
 
@@ -184,7 +184,7 @@ Resuming a session reopens that exact session ID (no new worktree is created dur
 
 claude-manager no longer creates git worktrees or session symlinks directly.
 
-Since new sessions are worktree-backed, the session selector resumes those worktree sessions directly.
+Since new sessions are worktree-backed, the session selector resumes those worktree sessions directly, through tmux-backed agents.
 
 Use orchestrator mode (`o`) to coordinate access to the main environment.
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -92,8 +93,8 @@ func runTUI() {
 		final := result.(tui.Model)
 
 		if path := final.NewSessionPath(); path != "" {
-			if err := startNewSession(path, final.SkipPermissions); err != nil {
-				fmt.Fprintf(os.Stderr, "Error starting session: %v\n", err)
+			if err := startOrAttachNewSessionAgent(path, final.SkipPermissions); err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting session agent: %v\n", err)
 			}
 			continue
 		}
@@ -103,10 +104,150 @@ func runTUI() {
 			return
 		}
 
-		if err := resumeSession(*selected, final.SkipPermissions); err != nil {
-			fmt.Fprintf(os.Stderr, "Error resuming session: %v\n", err)
+		if err := startOrAttachResumedSessionAgent(*selected, final.SkipPermissions); err != nil {
+			fmt.Fprintf(os.Stderr, "Error resuming session agent: %v\n", err)
 		}
 	}
+}
+
+func startOrAttachNewSessionAgent(projectPath string, skipPermissions bool) error {
+	agentName := buildNewSessionAgentName(projectPath)
+	command := []string{"claude", "--worktree"}
+	if skipPermissions {
+		command = append(command, "--dangerously-skip-permissions")
+	}
+	return startOrAttachAgentByName(agentName, projectPath, command)
+}
+
+func startOrAttachResumedSessionAgent(s sessions.Session, skipPermissions bool) error {
+	workspace := strings.TrimSpace(s.ProjectPath)
+	agentName := buildResumeSessionAgentName(s)
+	command := []string{"claude", "-r", s.ID}
+	if skipPermissions {
+		command = append(command, "--dangerously-skip-permissions")
+	}
+	return startOrAttachAgentByName(agentName, workspace, command)
+}
+
+func startOrAttachAgentByName(agentName, workspace string, command []string) error {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("workspace is empty and current directory unavailable: %w", err)
+		}
+		workspace = cwd
+	}
+
+	store, err := orchestrator.NewStore()
+	if err != nil {
+		return err
+	}
+	if err := store.Init(); err != nil {
+		return fmt.Errorf("init orchestrator store: %w", err)
+	}
+
+	agent, alive, err := store.AgentStatus(agentName)
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return err
+		}
+		agent, err = store.AddAgent(agentName, workspace)
+		if err != nil {
+			return err
+		}
+		alive = false
+	}
+
+	if alive {
+		if tmuxName, ok := orchestrator.ParseAgentTmuxSessionID(agent.SessionID); ok {
+			return attachTmuxSession(tmuxName)
+		}
+		if _, ok := orchestrator.ParseAgentPIDSessionID(agent.SessionID); ok {
+			return fmt.Errorf("agent %q is running as pid runtime; stop it from orchestrator then retry", agent.Name)
+		}
+	}
+
+	started, err := store.StartAgentTmux(agent.Name, command)
+	if err != nil {
+		return err
+	}
+
+	tmuxName, ok := orchestrator.ParseAgentTmuxSessionID(started.SessionID)
+	if !ok {
+		return fmt.Errorf("started agent %q but tmux session id is missing", started.Name)
+	}
+
+	return attachTmuxSession(tmuxName)
+}
+
+func attachTmuxSession(sessionName string) error {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return fmt.Errorf("tmux session name is required")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return fmt.Errorf("tmux is required but not found in PATH")
+	}
+
+	cmd := exec.Command("tmux", "attach-session", "-t", sessionName)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "TMUX=")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("attach tmux session %q: %w", sessionName, err)
+	}
+	return nil
+}
+
+func buildResumeSessionAgentName(s sessions.Session) string {
+	project := sanitizeAgentNamePart(s.Project)
+	if project == "" {
+		project = sanitizeAgentNamePart(s.ProjectPath)
+	}
+	if project == "" {
+		project = "session"
+	}
+	idPart := sanitizeAgentNamePart(s.ID)
+	if len(idPart) > 8 {
+		idPart = idPart[:8]
+	}
+	if idPart == "" {
+		idPart = "unknown"
+	}
+	return fmt.Sprintf("resume-%s-%s", project, idPart)
+}
+
+func buildNewSessionAgentName(projectPath string) string {
+	base := sanitizeAgentNamePart(filepath.Base(strings.TrimSpace(projectPath)))
+	if base == "" {
+		base = "session"
+	}
+	return fmt.Sprintf("new-%s-%d", base, time.Now().UnixNano())
+}
+
+func sanitizeAgentNamePart(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range raw {
+		isLetter := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if isLetter || isDigit {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteRune('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func runList() {
@@ -228,7 +369,7 @@ func runAgent(args []string) {
 		if len(command) == 0 {
 			command = []string{"claude"}
 		}
-		agent, err := store.StartAgentProcess(agentName, command)
+		agent, err := store.StartAgentTmux(agentName, command)
 		if err != nil {
 			if errors.Is(err, orchestrator.ErrNotInitialized) {
 				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
