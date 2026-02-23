@@ -72,38 +72,41 @@ func loadSessions() []sessions.Session {
 		fmt.Fprintf(os.Stderr, "Error loading sessions: %v\n", err)
 		os.Exit(1)
 	}
-	if len(ss) == 0 {
-		fmt.Fprintln(os.Stderr, "No sessions found in ~/.claude/projects/")
-		os.Exit(0)
-	}
 	return ss
 }
 
 func runTUI() {
-	ss := loadSessions()
 	cwd, _ := os.Getwd()
-	m := tui.NewModel(ss, cwd)
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	result, err := p.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	for {
+		ss := loadSessions()
+		m := tui.NewModel(ss, cwd)
+
+		p := tea.NewProgram(m, tea.WithAltScreen())
+		result, err := p.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		final := result.(tui.Model)
+
+		if path := final.NewSessionPath(); path != "" {
+			if err := startNewSession(path, final.SkipPermissions); err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting session: %v\n", err)
+			}
+			continue
+		}
+
+		selected := final.SelectedSession()
+		if selected == nil {
+			return
+		}
+
+		if err := resumeSession(*selected, final.SkipPermissions); err != nil {
+			fmt.Fprintf(os.Stderr, "Error resuming session: %v\n", err)
+		}
 	}
-
-	final := result.(tui.Model)
-
-	if path := final.NewSessionPath(); path != "" {
-		startNewSession(path, final.SkipPermissions)
-		return
-	}
-
-	selected := final.SelectedSession()
-	if selected == nil {
-		return
-	}
-
-	resumeSession(*selected, final.SkipPermissions)
 }
 
 func runList() {
@@ -124,7 +127,10 @@ func runResume(sessionID string) {
 
 	for _, s := range ss {
 		if s.ID == sessionID {
-			resumeSession(s, false)
+			if err := resumeSession(s, false); err != nil {
+				fmt.Fprintf(os.Stderr, "Error resuming session: %v\n", err)
+				os.Exit(1)
+			}
 			return
 		}
 	}
@@ -659,61 +665,59 @@ func startMainEnvAutoRenewLoop(store *orchestrator.Store, ttl time.Duration) fun
 	}
 }
 
-func startNewSession(projectPath string, skipPermissions bool) {
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
-		os.Exit(1)
-	}
-
-	if err := os.Chdir(projectPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error changing to %s: %v\n", projectPath, err)
-		os.Exit(1)
-	}
-
+func startNewSession(projectPath string, skipPermissions bool) error {
 	fmt.Printf("Starting new session in %s...\n", projectPath)
 
-	claudeArgs := []string{"claude", "--worktree"}
+	claudeArgs := []string{"--worktree"}
 	if skipPermissions {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}
 
-	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
-		os.Exit(1)
-	}
+	return runClaudeInProject(projectPath, claudeArgs)
 }
 
-func resumeSession(s sessions.Session, skipPermissions bool) {
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
-		os.Exit(1)
-	}
-
-	// Change to the project directory
-	if s.ProjectPath != "" {
-		if err := os.Chdir(s.ProjectPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error changing to %s: %v\n", s.ProjectPath, err)
-			os.Exit(1)
-		}
-	}
-
+func resumeSession(s sessions.Session, skipPermissions bool) error {
 	fmt.Printf("Resuming session in %s...\n", s.ProjectPath)
 
 	// Resume existing session (do not create a new worktree here)
-	claudeArgs := []string{"claude", "-r", s.ID}
+	claudeArgs := []string{"-r", s.ID}
 	if skipPermissions {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}
 
-	// Replace this process with claude -r <session-id>
-	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
+	return runClaudeInProject(s.ProjectPath, claudeArgs)
+}
+
+func runClaudeInProject(projectPath string, args []string) error {
+	claudePath, err := exec.LookPath("claude")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("'claude' not found in PATH")
 	}
+
+	if strings.TrimSpace(projectPath) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("project path is empty and current directory unavailable: %w", err)
+		}
+		projectPath = cwd
+	}
+	if stat, err := os.Stat(projectPath); err != nil {
+		return fmt.Errorf("read project path %s: %w", projectPath, err)
+	} else if !stat.IsDir() {
+		return fmt.Errorf("project path is not a directory: %s", projectPath)
+	}
+
+	cmd := exec.Command(claudePath, args...)
+	cmd.Dir = projectPath
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("claude exited with error: %w", err)
+	}
+
+	return nil
 }
 
 func truncateRunes(s string, maxLen int) string {

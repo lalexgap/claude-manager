@@ -29,6 +29,8 @@ claude-manager list
 claude-manager resume <session-id>
 ```
 
+When you start or resume a session from the TUI, exiting Claude drops you back into the TUI so you can jump to another session.
+
 ## Experimental Orchestrator Commands
 
 ```sh
@@ -118,6 +120,8 @@ For `dev_server` requests, pass payload json like:
 Agent runtime logs are written to:
 
 `~/.claude/claude-manager/agents/<agent-name>.log`
+
+Registered agents persist in `~/.claude/claude-manager/orchestrator.db`, so reopening `claude-manager` shows existing agents.
 
 ## Keybindings
 
