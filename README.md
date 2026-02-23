@@ -130,6 +130,7 @@ Agent runtime logs are written to:
 | `PgUp`/`PgDn` | Page up/down |
 | `Enter` | Resume selected session |
 | `n` | Start a new session (choose project) |
+| `o` | Open orchestration mode |
 | `w` | Toggle Claude `--worktree` mode for resume/new session |
 | `t` | Show worktree mode info |
 | `/` | Search (use `@repo` to filter by project) |
@@ -138,6 +139,32 @@ Agent runtime logs are written to:
 | `Esc` | Clear search / close help |
 | `?` | Toggle help |
 | `q` | Quit |
+
+### Orchestration Mode Keybindings (`o`)
+
+| Key | Action |
+|---|---|
+| `Esc` | Return to normal session view |
+| `q` | Quit app |
+| `r` | Refresh orchestrator data |
+| `↑`/`k`, `↓`/`j` | Move selected agent |
+| `s` | Start selected agent (`claude`) |
+| `x` | Stop selected agent (SIGTERM) |
+| `X` | Force stop selected agent |
+| `h` | Heartbeat selected agent |
+| `f` | Queue `run_feature_specs` for selected agent |
+| `d` | Queue `dev_server` status for selected agent |
+| `D` | Queue `dev_server` start for selected agent |
+| `n` | `grant-next` (`mode=normal`, `ttl=10m`) |
+| `R` | `run-next` (`mode=normal`, `ttl=10m`) via gateway config |
+| `u` | Renew active lease (`10m`) |
+| `l` | Release lease as success |
+
+The orchestration screen shows:
+- Main env lease summary: active, holder, mode, expires, queue depth
+- Agent list: name, status, session ID, workspace (truncated as needed)
+- Main env queue: id, agent, type, status, queued_at
+- Last action/status message line
 
 ## Worktree mode
 

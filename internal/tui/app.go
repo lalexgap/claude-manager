@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/lalexgap/claude-manager/internal/orchestrator"
 	"github.com/lalexgap/claude-manager/internal/sessions"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -33,6 +37,15 @@ type Model struct {
 	SkipPermissions  bool   // pass --dangerously-skip-permissions to claude
 	UseWorktree      bool   // pass --worktree to claude for resume/new session
 	showWorktrees    bool   // shows built-in worktree info
+	showOrchestrator bool
+
+	orchestratorStore      *orchestrator.Store
+	orchestratorStoreReady bool
+	orchestratorMainEnv    orchestrator.MainEnvStatus
+	orchestratorAgents     []orchestrator.Agent
+	orchestratorQueue      []orchestrator.MainEnvRequest
+	orchestratorCursor     int
+	orchestratorStatus     string
 }
 
 type projectEntry struct {
@@ -66,6 +79,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.showOrchestrator {
+			return m.handleOrchestratorKey(msg)
+		}
 		if m.showNewSession {
 			return m.handleNewSessionKey(msg)
 		}
@@ -114,6 +130,10 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc":
+		if m.showOrchestrator {
+			m.showOrchestrator = false
+			return m, nil
+		}
 		if m.showHelp {
 			m.showHelp = false
 			return m, nil
@@ -185,6 +205,15 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showWorktrees = true
 		return m, nil
 
+	case "o":
+		m.showOrchestrator = true
+		if err := m.refreshOrchestratorData(); err != nil {
+			m.orchestratorStatus = fmt.Sprintf("Orchestrator load failed: %v", err)
+		} else {
+			m.orchestratorStatus = "Orchestrator view refreshed."
+		}
+		return m, nil
+
 	case "n":
 		m.showNewSession = true
 		m.newSessionCursor = 0
@@ -210,6 +239,64 @@ func (m Model) handleWorktreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m Model) handleOrchestratorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.showOrchestrator = false
+		return m, nil
+	case "r":
+		if err := m.refreshOrchestratorData(); err != nil {
+			m.orchestratorStatus = fmt.Sprintf("Refresh failed: %v", err)
+		} else {
+			m.orchestratorStatus = "Refreshed orchestrator state."
+		}
+		return m, nil
+	case "up", "k":
+		if m.orchestratorCursor > 0 {
+			m.orchestratorCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.orchestratorCursor < len(m.orchestratorAgents)-1 {
+			m.orchestratorCursor++
+		}
+		return m, nil
+	case "home", "g":
+		m.orchestratorCursor = 0
+		return m, nil
+	case "end", "G":
+		if len(m.orchestratorAgents) > 0 {
+			m.orchestratorCursor = len(m.orchestratorAgents) - 1
+		}
+		return m, nil
+	case "s":
+		return m.runOrchestratorStartSelected(), nil
+	case "x":
+		return m.runOrchestratorStopSelected(false), nil
+	case "X":
+		return m.runOrchestratorStopSelected(true), nil
+	case "h":
+		return m.runOrchestratorHeartbeatSelected(), nil
+	case "f":
+		return m.runOrchestratorQueueRunFeatureSpecs(), nil
+	case "d":
+		return m.runOrchestratorQueueDevServer("status"), nil
+	case "D":
+		return m.runOrchestratorQueueDevServer("start"), nil
+	case "n":
+		return m.runOrchestratorGrantNext(), nil
+	case "R":
+		return m.runOrchestratorRunNext(), nil
+	case "u":
+		return m.runOrchestratorRenewLease(), nil
+	case "l":
+		return m.runOrchestratorReleaseSuccess(), nil
 	}
 	return m, nil
 }
@@ -398,6 +485,10 @@ func (m Model) View() string {
 		return m.renderWorktrees()
 	}
 
+	if m.showOrchestrator {
+		return m.renderOrchestrator()
+	}
+
 	if m.showHelp {
 		return m.renderHelp()
 	}
@@ -500,10 +591,506 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • n new session • w worktree • t worktree info • / search • ! skip-perms • ? help • q quit"
+	help := "↑↓ navigate • enter resume • n new session • o orchestrator • w worktree • t worktree info • / search • ! skip-perms • ? help • q quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
+}
+
+func (m *Model) ensureOrchestratorStore() error {
+	if m.orchestratorStore == nil {
+		store, err := orchestrator.NewStore()
+		if err != nil {
+			return err
+		}
+		m.orchestratorStore = store
+	}
+	if m.orchestratorStoreReady {
+		return nil
+	}
+
+	status, err := m.orchestratorStore.Status()
+	if err != nil {
+		return err
+	}
+	if !status.Initialized {
+		if err := m.orchestratorStore.Init(); err != nil {
+			return err
+		}
+	}
+
+	m.orchestratorStoreReady = true
+	return nil
+}
+
+func (m *Model) withOrchestratorStore(run func(*orchestrator.Store) error) error {
+	if err := m.ensureOrchestratorStore(); err != nil {
+		return err
+	}
+
+	err := run(m.orchestratorStore)
+	if errors.Is(err, orchestrator.ErrNotInitialized) {
+		m.orchestratorStoreReady = false
+		if reinitErr := m.ensureOrchestratorStore(); reinitErr != nil {
+			return reinitErr
+		}
+		return run(m.orchestratorStore)
+	}
+	return err
+}
+
+func (m *Model) refreshOrchestratorData() error {
+	var mainEnv orchestrator.MainEnvStatus
+	var agents []orchestrator.Agent
+	var queue []orchestrator.MainEnvRequest
+
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		mainEnv, err = store.MainEnvStatus()
+		if err != nil {
+			return err
+		}
+		agents, err = store.ListAgents()
+		if err != nil {
+			return err
+		}
+		queue, err = store.ListMainEnvQueue()
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	m.orchestratorMainEnv = mainEnv
+	m.orchestratorAgents = agents
+	m.orchestratorQueue = queue
+	if m.orchestratorCursor >= len(m.orchestratorAgents) {
+		m.orchestratorCursor = len(m.orchestratorAgents) - 1
+	}
+	if m.orchestratorCursor < 0 {
+		m.orchestratorCursor = 0
+	}
+	return nil
+}
+
+func (m Model) selectedOrchestratorAgent() (orchestrator.Agent, bool) {
+	if len(m.orchestratorAgents) == 0 {
+		return orchestrator.Agent{}, false
+	}
+	if m.orchestratorCursor < 0 || m.orchestratorCursor >= len(m.orchestratorAgents) {
+		return orchestrator.Agent{}, false
+	}
+	return m.orchestratorAgents[m.orchestratorCursor], true
+}
+
+func (m Model) runOrchestratorStartSelected() Model {
+	agent, ok := m.selectedOrchestratorAgent()
+	if !ok {
+		m.orchestratorStatus = "No agent selected."
+		return m
+	}
+
+	var started orchestrator.Agent
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		started, err = store.StartAgentProcess(agent.Name, []string{"claude"})
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Start failed for %q: %v", agent.Name, err)
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Started %q (%s); refresh failed: %v", started.Name, started.SessionID, err)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Started %q (%s).", started.Name, started.SessionID)
+	return m
+}
+
+func (m Model) runOrchestratorStopSelected(force bool) Model {
+	agent, ok := m.selectedOrchestratorAgent()
+	if !ok {
+		m.orchestratorStatus = "No agent selected."
+		return m
+	}
+
+	var stopped orchestrator.Agent
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		stopped, err = store.StopAgentProcess(agent.Name, force)
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Stop failed for %q: %v", agent.Name, err)
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Stopped %q; refresh failed: %v", stopped.Name, err)
+		return m
+	}
+	if force {
+		m.orchestratorStatus = fmt.Sprintf("Force-stopped %q.", stopped.Name)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Stopped %q.", stopped.Name)
+	return m
+}
+
+func (m Model) runOrchestratorHeartbeatSelected() Model {
+	agent, ok := m.selectedOrchestratorAgent()
+	if !ok {
+		m.orchestratorStatus = "No agent selected."
+		return m
+	}
+
+	var updated orchestrator.Agent
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		updated, err = store.HeartbeatAgent(agent.Name)
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Heartbeat failed for %q: %v", agent.Name, err)
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Heartbeat updated for %q; refresh failed: %v", updated.Name, err)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Heartbeat updated for %q at %s.", updated.Name, updated.LastHeartbeat)
+	return m
+}
+
+func (m Model) runOrchestratorQueueRunFeatureSpecs() Model {
+	agent, ok := m.selectedOrchestratorAgent()
+	if !ok {
+		m.orchestratorStatus = "No agent selected."
+		return m
+	}
+
+	var req orchestrator.MainEnvRequest
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		req, err = store.RequestMainEnv(agent.Name, "run_feature_specs", "", "")
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Queue run_feature_specs failed for %q: %v", agent.Name, err)
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Queued request #%d; refresh failed: %v", req.ID, err)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Queued run_feature_specs for %q as request #%d.", req.AgentName, req.ID)
+	return m
+}
+
+func (m Model) runOrchestratorQueueDevServer(action string) Model {
+	agent, ok := m.selectedOrchestratorAgent()
+	if !ok {
+		m.orchestratorStatus = "No agent selected."
+		return m
+	}
+
+	payload := fmt.Sprintf(`{"action":"%s"}`, action)
+	var req orchestrator.MainEnvRequest
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		req, err = store.RequestMainEnv(agent.Name, "dev_server", payload, "")
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Queue dev_server.%s failed for %q: %v", action, agent.Name, err)
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Queued request #%d; refresh failed: %v", req.ID, err)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Queued dev_server.%s for %q as request #%d.", action, req.AgentName, req.ID)
+	return m
+}
+
+func (m Model) runOrchestratorGrantNext() Model {
+	var granted *orchestrator.MainEnvRequest
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		granted, err = store.GrantNextMainEnv("normal", 10*time.Minute)
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Grant-next failed: %v", err)
+		return m
+	}
+	if granted == nil {
+		m.orchestratorStatus = "No queued main environment requests."
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Granted request #%d; refresh failed: %v", granted.ID, err)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Granted request #%d to %q (mode=normal ttl=10m).", granted.ID, granted.AgentName)
+	return m
+}
+
+func (m Model) runOrchestratorRunNext() Model {
+	cfg, err := orchestrator.LoadGatewayConfig("")
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Gateway config error: %v", err)
+		return m
+	}
+
+	ttl := 10 * time.Minute
+	var granted *orchestrator.MainEnvRequest
+	var result orchestrator.GatewayResult
+	err = m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		granted, err = store.GrantNextMainEnv("normal", ttl)
+		if err != nil || granted == nil {
+			return err
+		}
+
+		stopAutoRenew := startMainEnvAutoRenewLoop(store, ttl)
+		result = orchestrator.ExecuteMainEnvRequest(*granted, cfg)
+		autoRenewErr := stopAutoRenew()
+
+		resultJSON, _ := json.Marshal(result)
+		releaseErr := store.ReleaseMainEnv(string(resultJSON), !result.Success)
+		if releaseErr != nil {
+			return releaseErr
+		}
+		if autoRenewErr != nil {
+			return autoRenewErr
+		}
+
+		return nil
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Run-next failed: %v", err)
+		return m
+	}
+	if granted == nil {
+		m.orchestratorStatus = "No queued main environment requests."
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Executed request #%d; refresh failed: %v", granted.ID, err)
+		return m
+	}
+	if result.Success {
+		m.orchestratorStatus = fmt.Sprintf("Executed request #%d for %q successfully (exit=%d).", granted.ID, granted.AgentName, result.ExitCode)
+		return m
+	}
+	if result.Error != "" {
+		m.orchestratorStatus = fmt.Sprintf("Executed request #%d for %q but failed: %s", granted.ID, granted.AgentName, result.Error)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Executed request #%d for %q but failed (exit=%d).", granted.ID, granted.AgentName, result.ExitCode)
+	return m
+}
+
+func (m Model) runOrchestratorRenewLease() Model {
+	var lease orchestrator.LeaseInfo
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		lease, err = store.RenewMainEnvLease(10 * time.Minute)
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Renew lease failed: %v", err)
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Renewed lease for %q; refresh failed: %v", lease.HolderAgentName, err)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Renewed lease for %q to %s.", lease.HolderAgentName, lease.ExpiresAt)
+	return m
+}
+
+func (m Model) runOrchestratorReleaseSuccess() Model {
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		return store.ReleaseMainEnv("", false)
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Release lease failed: %v", err)
+		return m
+	}
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Released lease; refresh failed: %v", err)
+		return m
+	}
+	m.orchestratorStatus = "Released main environment lease as success."
+	return m
+}
+
+func (m Model) renderOrchestrator() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Width(m.width).Render(" claude-manager — Orchestrator"))
+	b.WriteString("\n")
+
+	holder := "none"
+	if m.orchestratorMainEnv.Lease.HolderAgentName != "" {
+		holder = m.orchestratorMainEnv.Lease.HolderAgentName
+	}
+	expires := "-"
+	if m.orchestratorMainEnv.Lease.ExpiresAt != "" {
+		expires = m.orchestratorMainEnv.Lease.ExpiresAt
+	}
+	mode := m.orchestratorMainEnv.Lease.Mode
+	if mode == "" {
+		mode = "normal"
+	}
+	active := "no"
+	if m.orchestratorMainEnv.Lease.Active {
+		active = "yes"
+	}
+
+	leaseSummary := fmt.Sprintf("Lease active: %s  Holder: %s  Mode: %s  Expires: %s  Queue depth: %d",
+		active,
+		holder,
+		mode,
+		expires,
+		m.orchestratorMainEnv.QueueDepth,
+	)
+	b.WriteString(lipgloss.NewStyle().Padding(0, 1).Foreground(white).Render(truncate(leaseSummary, max(20, m.width-2))))
+	b.WriteString("\n")
+
+	layoutHeight := m.height - 7
+	if layoutHeight < 8 {
+		layoutHeight = 8
+	}
+	agentsHeight := layoutHeight / 2
+	if agentsHeight < 4 {
+		agentsHeight = 4
+	}
+	queueHeight := layoutHeight - agentsHeight
+	if queueHeight < 3 {
+		queueHeight = 3
+	}
+
+	b.WriteString(m.renderOrchestratorAgents(agentsHeight))
+	b.WriteString("\n")
+	b.WriteString(m.renderOrchestratorQueue(queueHeight))
+	b.WriteString("\n")
+
+	status := m.orchestratorStatus
+	if strings.TrimSpace(status) == "" {
+		status = "Ready. Press r to refresh."
+	}
+	b.WriteString(statusBarStyle.Width(m.width).Render(" " + truncate(status, max(20, m.width-2))))
+	b.WriteString("\n")
+	help := "Esc back • q quit • r refresh • ↑↓/j/k select • s start • x stop • X force-stop • h heartbeat • f queue specs • d queue dev status • D queue dev start • n grant-next • R run-next • u renew • l release"
+	b.WriteString(helpStyle.Render(truncate(help, max(20, m.width-2))))
+	return b.String()
+}
+
+func (m Model) renderOrchestratorAgents(height int) string {
+	var b strings.Builder
+	title := lipgloss.NewStyle().Foreground(highlight).Bold(true).Render("Agents")
+	b.WriteString(lipgloss.NewStyle().Padding(0, 1).Render(title))
+	b.WriteString("\n")
+
+	nameW := 16
+	statusW := 16
+	sessionW := 14
+	workspaceW := m.width - 6 - nameW - statusW - sessionW
+	if workspaceW < 12 {
+		workspaceW = 12
+	}
+
+	header := fmt.Sprintf("%-*s %-*s %-*s %-*s", nameW, "name", statusW, "status", sessionW, "session_id", workspaceW, "workspace")
+	b.WriteString(lipgloss.NewStyle().Foreground(dimText).PaddingLeft(1).Render(header))
+	b.WriteString("\n")
+
+	rows := height - 2
+	if rows < 1 {
+		rows = 1
+	}
+	if len(m.orchestratorAgents) == 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimText).PaddingLeft(1).Render("No agents found. Add agents via CLI: claude-manager agent add <name> <workspace>"))
+		return b.String()
+	}
+
+	start := 0
+	if m.orchestratorCursor >= rows {
+		start = m.orchestratorCursor - rows + 1
+	}
+	end := start + rows
+	if end > len(m.orchestratorAgents) {
+		end = len(m.orchestratorAgents)
+	}
+
+	for i := start; i < end; i++ {
+		a := m.orchestratorAgents[i]
+		line := fmt.Sprintf("%-*s %-*s %-*s %-*s",
+			nameW, truncate(a.Name, nameW),
+			statusW, truncate(a.Status, statusW),
+			sessionW, truncate(a.SessionID, sessionW),
+			workspaceW, truncate(a.WorkspacePath, workspaceW),
+		)
+		if i == m.orchestratorCursor {
+			b.WriteString(selectedItemStyle.Render(line))
+		} else {
+			b.WriteString(itemStyle.Render(line))
+		}
+		b.WriteString("\n")
+	}
+
+	rendered := end - start
+	for i := rendered; i < rows; i++ {
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) renderOrchestratorQueue(height int) string {
+	var b strings.Builder
+	title := lipgloss.NewStyle().Foreground(highlight).Bold(true).Render("Main Env Queue")
+	b.WriteString(lipgloss.NewStyle().Padding(0, 1).Render(title))
+	b.WriteString("\n")
+
+	idW := 6
+	agentW := 14
+	typeW := 18
+	statusW := 10
+	queuedW := m.width - 6 - idW - agentW - typeW - statusW
+	if queuedW < 16 {
+		queuedW = 16
+	}
+
+	header := fmt.Sprintf("%-*s %-*s %-*s %-*s %-*s", idW, "id", agentW, "agent", typeW, "type", statusW, "status", queuedW, "queued_at")
+	b.WriteString(lipgloss.NewStyle().Foreground(dimText).PaddingLeft(1).Render(header))
+	b.WriteString("\n")
+
+	rows := height - 2
+	if rows < 1 {
+		rows = 1
+	}
+	if len(m.orchestratorQueue) == 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimText).PaddingLeft(1).Render("Queue is empty."))
+		return b.String()
+	}
+
+	for i := 0; i < len(m.orchestratorQueue) && i < rows; i++ {
+		req := m.orchestratorQueue[i]
+		line := fmt.Sprintf("%-*d %-*s %-*s %-*s %-*s",
+			idW, req.ID,
+			agentW, truncate(req.AgentName, agentW),
+			typeW, truncate(req.RequestType, typeW),
+			statusW, truncate(req.Status, statusW),
+			queuedW, truncate(req.QueuedAt, queuedW),
+		)
+		b.WriteString(itemStyle.Render(line))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m Model) renderWorktrees() string {
@@ -542,6 +1129,7 @@ func (m Model) renderHelp() string {
 		{"PgUp/PgDn", "Page up/down"},
 		{"Enter", "Resume selected session"},
 		{"n", "New session (choose project)"},
+		{"o", "Open orchestrator mode"},
 		{"w", "Toggle Claude --worktree mode"},
 		{"t", "Show worktree mode info"},
 		{"/", "Search (@repo to filter by project)"},
@@ -564,4 +1152,50 @@ func (m Model) renderHelp() string {
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("Press ? or Esc to close"))
 	return b.String()
+}
+
+func startMainEnvAutoRenewLoop(store *orchestrator.Store, ttl time.Duration) func() error {
+	interval := ttl / 2
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	if interval < 1*time.Second {
+		interval = 1 * time.Second
+	}
+
+	stopCh := make(chan struct{})
+	doneCh := make(chan error, 1)
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if _, err := store.RenewMainEnvLease(ttl); err != nil {
+					if strings.Contains(err.Error(), "no active holder") {
+						continue
+					}
+					doneCh <- err
+					return
+				}
+			case <-stopCh:
+				doneCh <- nil
+				return
+			}
+		}
+	}()
+
+	return func() error {
+		close(stopCh)
+		return <-doneCh
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
