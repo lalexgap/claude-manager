@@ -148,6 +148,7 @@ Agent runtime logs are written to:
 | `r` | Refresh orchestrator data |
 | `↑`/`k`, `↓`/`j` | Move selected agent |
 | `s` | Start selected agent (`claude`) |
+| `S` | Start all non-running agents (`claude`) |
 | `x` | Stop selected agent (SIGTERM) |
 | `X` | Force stop selected agent |
 | `h` | Heartbeat selected agent |

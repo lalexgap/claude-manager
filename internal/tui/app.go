@@ -274,6 +274,8 @@ func (m Model) handleOrchestratorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "s":
 		return m.runOrchestratorStartSelected(), nil
+	case "S":
+		return m.runOrchestratorStartAllAgents(), nil
 	case "x":
 		return m.runOrchestratorStopSelected(false), nil
 	case "X":
@@ -708,6 +710,51 @@ func (m Model) runOrchestratorStartSelected() Model {
 	return m
 }
 
+func (m Model) runOrchestratorStartAllAgents() Model {
+	if len(m.orchestratorAgents) == 0 {
+		m.orchestratorStatus = "No agents found to start."
+		return m
+	}
+
+	started := 0
+	skippedRunning := 0
+	failed := 0
+	failureSamples := make([]string, 0, 2)
+
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		for _, agent := range m.orchestratorAgents {
+			if strings.EqualFold(agent.Status, "running") {
+				skippedRunning++
+				continue
+			}
+			if _, err := store.StartAgentProcess(agent.Name, []string{"claude"}); err != nil {
+				failed++
+				if len(failureSamples) < 2 {
+					failureSamples = append(failureSamples, fmt.Sprintf("%s: %v", agent.Name, err))
+				}
+				continue
+			}
+			started++
+		}
+		return nil
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Batch start failed: %v", err)
+		return m
+	}
+
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Batch start done (started=%d, skipped=%d, failed=%d); refresh failed: %v", started, skippedRunning, failed, err)
+		return m
+	}
+
+	m.orchestratorStatus = fmt.Sprintf("Batch start: started=%d skipped-running=%d failed=%d", started, skippedRunning, failed)
+	if len(failureSamples) > 0 {
+		m.orchestratorStatus += " [" + strings.Join(failureSamples, " | ") + "]"
+	}
+	return m
+}
+
 func (m Model) runOrchestratorStopSelected(force bool) Model {
 	agent, ok := m.selectedOrchestratorAgent()
 	if !ok {
@@ -983,7 +1030,7 @@ func (m Model) renderOrchestrator() string {
 	}
 	b.WriteString(statusBarStyle.Width(m.width).Render(" " + truncate(status, max(20, m.width-2))))
 	b.WriteString("\n")
-	help := "Esc back • q quit • r refresh • ↑↓/j/k select • s start • x stop • X force-stop • h heartbeat • f queue specs • d queue dev status • D queue dev start • n grant-next • R run-next • u renew • l release"
+	help := "Esc back • q quit • r refresh • ↑↓/j/k select • s start • S start-all • x stop • X force-stop • h heartbeat • f queue specs • d queue dev status • D queue dev start • n grant-next • R run-next • u renew • l release"
 	b.WriteString(helpStyle.Render(truncate(help, max(20, m.width-2))))
 	return b.String()
 }
