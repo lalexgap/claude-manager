@@ -63,6 +63,8 @@ type orchestratorAttachDoneMsg struct {
 	err       error
 }
 
+type orchestratorInitMsg struct{}
+
 type projectEntry struct {
 	Name string
 	Path string
@@ -80,11 +82,15 @@ func NewModel(ss []sessions.Session, cwd string) Model {
 		search:           ti,
 		cwd:              cwd,
 		UseWorktree:      true, // always run sessions in a worktree
+		showOrchestrator: true, // orchestrator is now the primary screen
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.SetWindowTitle("claude-manager")
+	return tea.Batch(
+		tea.SetWindowTitle("claude-manager"),
+		func() tea.Msg { return orchestratorInitMsg{} },
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -119,6 +125,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.orchestratorStatus = fmt.Sprintf("Detached from %q.", msg.agentName)
+		return m, nil
+
+	case orchestratorInitMsg:
+		if m.showOrchestrator {
+			if err := m.refreshOrchestratorData(); err != nil {
+				m.orchestratorStatus = fmt.Sprintf("Orchestrator load failed: %v", err)
+			} else {
+				m.orchestratorStatus = "Orchestrator ready."
+			}
+		}
 		return m, nil
 	}
 
@@ -276,7 +292,6 @@ func (m Model) handleOrchestratorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		m.showOrchestrator = false
 		return m, nil
 	case "r":
 		if err := m.refreshOrchestratorData(); err != nil {

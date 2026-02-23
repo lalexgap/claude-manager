@@ -19,7 +19,7 @@ go install github.com/lalexgap/claude-manager@latest
 ## Usage
 
 ```sh
-# Launch interactive TUI
+# Launch interactive TUI (opens orchestrator screen)
 claude-manager
 
 # List all sessions as a table
@@ -147,7 +147,7 @@ Registered agents persist in `~/.claude/claude-manager/orchestrator.db`, so reop
 
 | Key | Action |
 |---|---|
-| `Esc` | Return to normal session view |
+| `Esc` | Cancel Add Agent form (no-op on main orchestrator view) |
 | `q` | Quit app |
 | `r` | Refresh orchestrator data |
 | `a` | Open Add Agent form (name + workspace) |
