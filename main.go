@@ -51,6 +51,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  claude-manager orchestrator status")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent add <name> <workspace>")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent list")
+	fmt.Fprintln(os.Stderr, "  claude-manager agent start <name> [command ...]")
+	fmt.Fprintln(os.Stderr, "  claude-manager agent stop <name> [--force]")
+	fmt.Fprintln(os.Stderr, "  claude-manager agent status <name>")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent heartbeat <name>")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent heartbeat-loop <name> [interval]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv status")
@@ -173,7 +176,7 @@ func runAgent(args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name> | heartbeat-loop <name> [interval]]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | start <name> [command ...] | stop <name> [--force] | status <name> | heartbeat <name> | heartbeat-loop <name> [interval]]")
 		os.Exit(1)
 	}
 
@@ -209,6 +212,77 @@ func runAgent(args []string) {
 			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", a.ID, a.Name, a.Status, a.WorkspacePath, a.UpdatedAt)
 		}
 		w.Flush()
+	case "start":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent start <name> [command ...]")
+			os.Exit(1)
+		}
+		agentName := args[1]
+		command := args[2:]
+		if len(command) == 0 {
+			command = []string{"claude"}
+		}
+		agent, err := store.StartAgentProcess(agentName, command)
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error starting agent process: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Started agent %q with session_id=%s\n", agent.Name, agent.SessionID)
+	case "stop":
+		if len(args) < 2 || len(args) > 3 {
+			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent stop <name> [--force]")
+			os.Exit(1)
+		}
+		force := false
+		if len(args) == 3 {
+			if args[2] != "--force" {
+				fmt.Fprintln(os.Stderr, "Usage: claude-manager agent stop <name> [--force]")
+				os.Exit(1)
+			}
+			force = true
+		}
+		agent, err := store.StopAgentProcess(args[1], force)
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error stopping agent process: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Stopped agent %q (status=%s)\n", agent.Name, agent.Status)
+	case "status":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent status <name>")
+			os.Exit(1)
+		}
+		agent, pidAlive, err := store.AgentStatus(args[1])
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error reading agent status: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Name: %s\n", agent.Name)
+		fmt.Printf("Status: %s\n", agent.Status)
+		if agent.SessionID == "" {
+			fmt.Println("Session ID: -")
+		} else {
+			fmt.Printf("Session ID: %s\n", agent.SessionID)
+		}
+		if _, hasPID := orchestrator.ParseAgentPIDSessionID(agent.SessionID); hasPID {
+			fmt.Printf("PID alive: %t\n", pidAlive)
+		} else {
+			fmt.Println("PID alive: n/a")
+		}
+		fmt.Printf("Workspace: %s\n", agent.WorkspacePath)
+		fmt.Printf("Updated at: %s\n", agent.UpdatedAt)
 	case "heartbeat":
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent heartbeat <name>")
@@ -247,7 +321,7 @@ func runAgent(args []string) {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name> | heartbeat-loop <name> [interval]]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | start <name> [command ...] | stop <name> [--force] | status <name> | heartbeat <name> | heartbeat-loop <name> [interval]]")
 		os.Exit(1)
 	}
 }

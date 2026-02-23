@@ -44,6 +44,16 @@ claude-manager agent add <name> <workspace>
 # List registered agents
 claude-manager agent list
 
+# Start an agent runtime process in its workspace
+# default command: claude
+claude-manager agent start <name> [command ...]
+
+# Stop an agent runtime process (SIGTERM by default, SIGKILL with --force)
+claude-manager agent stop <name> [--force]
+
+# Show agent status and PID liveness (when session_id is pid:<n>)
+claude-manager agent status <name>
+
 # Agent heartbeat (updates agent + lease heartbeat timestamps)
 claude-manager agent heartbeat <name>
 
@@ -104,6 +114,10 @@ For `dev_server` requests, pass payload json like:
 `{"action":"start"}` (`start|stop|restart|status|logs`).
 
 `grant-next` / `run-next` automatically reclaim expired stale leases before granting.
+
+Agent runtime logs are written to:
+
+`~/.claude/claude-manager/agents/<agent-name>.log`
 
 ## Keybindings
 
