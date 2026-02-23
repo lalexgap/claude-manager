@@ -702,8 +702,8 @@ func resumeSession(s sessions.Session, skipPermissions bool) {
 
 	fmt.Printf("Resuming session in %s...\n", s.ProjectPath)
 
-	// Build claude args
-	claudeArgs := []string{"claude", "-r", s.ID, "--worktree"}
+	// Resume existing session (do not create a new worktree here)
+	claudeArgs := []string{"claude", "-r", s.ID}
 	if skipPermissions {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}

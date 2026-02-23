@@ -168,11 +168,13 @@ The orchestration screen shows:
 
 ## Worktree mode
 
-claude-manager always calls Claude Code with `--worktree` for new sessions and resumed sessions.
+claude-manager calls Claude Code with `--worktree` when starting new sessions.
 
-Claude manages worktree creation/selection automatically.
+Resuming a session reopens that exact session ID (no new worktree is created during resume).
 
 claude-manager no longer creates git worktrees or session symlinks directly.
+
+Since new sessions are worktree-backed, the session selector resumes those worktree sessions directly.
 
 Use orchestrator mode (`o`) to coordinate access to the main environment.
 
