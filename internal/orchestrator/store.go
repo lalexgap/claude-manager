@@ -178,6 +178,69 @@ func (s *Store) ListAgents() ([]Agent, error) {
 	return agents, nil
 }
 
+func (s *Store) HeartbeatAgent(agentName string) (Agent, error) {
+	agent := Agent{}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return agent, fmt.Errorf("agent name is required")
+	}
+
+	db, err := s.openInitializedDB()
+	if err != nil {
+		return agent, err
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return agent, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := tx.QueryRow(`SELECT id, status FROM agents WHERE name = ?`, agentName).Scan(&agent.ID, &agent.Status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return agent, fmt.Errorf("agent %q not found", agentName)
+		}
+		return agent, fmt.Errorf("load agent: %w", err)
+	}
+
+	if _, err := tx.Exec(`UPDATE agents SET last_heartbeat_at = CURRENT_TIMESTAMP WHERE id = ?`, agent.ID); err != nil {
+		return agent, fmt.Errorf("update agent heartbeat: %w", err)
+	}
+
+	if agent.Status == "holding_mainenv" {
+		if _, err := tx.Exec(`
+			UPDATE main_env_lease
+			SET last_heartbeat_at = CURRENT_TIMESTAMP
+			WHERE id = 1 AND holder_agent_id = ?`, agent.ID); err != nil {
+			return agent, fmt.Errorf("update lease heartbeat: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(`INSERT INTO events(kind, actor, entity_id) VALUES (?, ?, ?)`, "agent.heartbeat", "agent:"+agentName, fmt.Sprintf("agent:%d", agent.ID)); err != nil {
+		return agent, fmt.Errorf("insert event: %w", err)
+	}
+
+	if err := tx.QueryRow(`SELECT id, name, workspace_path, status, IFNULL(session_id, ''), IFNULL(last_heartbeat_at, ''), created_at, updated_at FROM agents WHERE id = ?`, agent.ID).Scan(
+		&agent.ID,
+		&agent.Name,
+		&agent.WorkspacePath,
+		&agent.Status,
+		&agent.SessionID,
+		&agent.LastHeartbeat,
+		&agent.CreatedAt,
+		&agent.UpdatedAt,
+	); err != nil {
+		return agent, fmt.Errorf("reload agent: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return agent, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return agent, nil
+}
+
 func (s *Store) RequestMainEnv(agentName, requestType, payloadJSON, reason string) (MainEnvRequest, error) {
 	req := MainEnvRequest{}
 	agentName = strings.TrimSpace(agentName)
@@ -352,6 +415,114 @@ func (s *Store) MainEnvStatus() (MainEnvStatus, error) {
 	return status, nil
 }
 
+func (s *Store) RenewMainEnvLease(ttl time.Duration) (LeaseInfo, error) {
+	lease := LeaseInfo{}
+	if ttl <= 0 {
+		return lease, fmt.Errorf("ttl must be greater than zero")
+	}
+
+	db, err := s.openInitializedDB()
+	if err != nil {
+		return lease, err
+	}
+	defer db.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return lease, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var isActive int
+	if err := tx.QueryRow(`
+		SELECT
+			IFNULL(l.holder_agent_id, 0),
+			IFNULL(a.name, ''),
+			l.mode,
+			IFNULL(l.lease_token, ''),
+			IFNULL(l.acquired_at, ''),
+			IFNULL(l.expires_at, ''),
+			IFNULL(l.last_heartbeat_at, ''),
+			CASE
+				WHEN l.holder_agent_id IS NOT NULL AND l.expires_at IS NOT NULL AND l.expires_at > CURRENT_TIMESTAMP THEN 1
+				ELSE 0
+			END
+		FROM main_env_lease l
+		LEFT JOIN agents a ON a.id = l.holder_agent_id
+		WHERE l.id = 1`).Scan(
+		&lease.HolderAgentID,
+		&lease.HolderAgentName,
+		&lease.Mode,
+		&lease.LeaseToken,
+		&lease.AcquiredAt,
+		&lease.ExpiresAt,
+		&lease.LastHeartbeatAt,
+		&isActive,
+	); err != nil {
+		return lease, fmt.Errorf("query current lease: %w", err)
+	}
+	lease.Active = isActive == 1
+
+	if lease.HolderAgentID == 0 {
+		return lease, fmt.Errorf("main environment has no active holder")
+	}
+	if !lease.Active {
+		return lease, fmt.Errorf("main environment lease is expired; run `claude-manager mainenv reclaim-stale`")
+	}
+
+	seconds := int64(ttl / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	expiryModifier := fmt.Sprintf("+%d seconds", seconds)
+	if _, err := tx.Exec(`
+		UPDATE main_env_lease
+		SET expires_at = DATETIME(CURRENT_TIMESTAMP, ?),
+		    last_heartbeat_at = CURRENT_TIMESTAMP
+		WHERE id = 1`, expiryModifier); err != nil {
+		return lease, fmt.Errorf("renew lease: %w", err)
+	}
+
+	if _, err := tx.Exec(`INSERT INTO events(kind, actor, entity_id) VALUES (?, ?, ?)`, "mainenv.renewed", "system", fmt.Sprintf("agent:%d", lease.HolderAgentID)); err != nil {
+		return lease, fmt.Errorf("insert event: %w", err)
+	}
+
+	if err := tx.QueryRow(`
+		SELECT
+			IFNULL(l.holder_agent_id, 0),
+			IFNULL(a.name, ''),
+			l.mode,
+			IFNULL(l.lease_token, ''),
+			IFNULL(l.acquired_at, ''),
+			IFNULL(l.expires_at, ''),
+			IFNULL(l.last_heartbeat_at, ''),
+			CASE
+				WHEN l.holder_agent_id IS NOT NULL AND l.expires_at IS NOT NULL AND l.expires_at > CURRENT_TIMESTAMP THEN 1
+				ELSE 0
+			END
+		FROM main_env_lease l
+		LEFT JOIN agents a ON a.id = l.holder_agent_id
+		WHERE l.id = 1`).Scan(
+		&lease.HolderAgentID,
+		&lease.HolderAgentName,
+		&lease.Mode,
+		&lease.LeaseToken,
+		&lease.AcquiredAt,
+		&lease.ExpiresAt,
+		&lease.LastHeartbeatAt,
+		&isActive,
+	); err != nil {
+		return lease, fmt.Errorf("reload lease: %w", err)
+	}
+	lease.Active = isActive == 1
+
+	if err := tx.Commit(); err != nil {
+		return lease, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return lease, nil
+}
+
 func (s *Store) GrantNextMainEnv(mode string, ttl time.Duration) (*MainEnvRequest, error) {
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
@@ -394,10 +565,13 @@ func (s *Store) GrantNextMainEnv(mode string, ttl time.Duration) (*MainEnvReques
 		return nil, fmt.Errorf("main environment already has an active lease")
 	}
 	if holderAgentID != 0 {
+		reason := `{"reason":"lease_expired"}`
 		if leaseExpiresAt == "" {
-			return nil, fmt.Errorf("main environment has a stale lease; run `claude-manager mainenv reclaim-stale`")
+			reason = `{"reason":"lease_stale"}`
 		}
-		return nil, fmt.Errorf("main environment has an expired lease (%s); run `claude-manager mainenv reclaim-stale`", leaseExpiresAt)
+		if _, err := releaseMainEnvTx(tx, reason, true); err != nil {
+			return nil, fmt.Errorf("auto-reclaim stale lease: %w", err)
+		}
 	}
 
 	req := MainEnvRequest{}

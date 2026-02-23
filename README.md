@@ -44,6 +44,9 @@ claude-manager agent add <name> <workspace>
 # List registered agents
 claude-manager agent list
 
+# Agent heartbeat (updates agent + lease heartbeat timestamps)
+claude-manager agent heartbeat <name>
+
 # Show main environment lease + queue depth
 claude-manager mainenv status
 
@@ -59,6 +62,9 @@ claude-manager mainenv grant-next [mode] [ttl]
 
 # Grant + execute oldest queued request via gateway commands
 claude-manager mainenv run-next [mode] [ttl]
+
+# Extend the active lease (default ttl=10m)
+claude-manager mainenv renew [ttl]
 
 # Release current lease
 claude-manager mainenv release [success|failed] [result-json]
@@ -92,6 +98,8 @@ Example:
 
 For `dev_server` requests, pass payload json like:
 `{"action":"start"}` (`start|stop|restart|status|logs`).
+
+`grant-next` / `run-next` automatically reclaim expired stale leases before granting.
 
 ## Keybindings
 

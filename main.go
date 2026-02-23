@@ -50,11 +50,13 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  claude-manager orchestrator status")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent add <name> <workspace>")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent list")
+	fmt.Fprintln(os.Stderr, "  claude-manager agent heartbeat <name>")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv status")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv request <agent-name> <request-type> [payload-json]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv queue")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv grant-next [mode] [ttl]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv run-next [mode] [ttl]")
+	fmt.Fprintln(os.Stderr, "  claude-manager mainenv renew [ttl]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv release [success|failed] [result-json]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv reclaim-stale")
 }
@@ -169,7 +171,7 @@ func runAgent(args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name>]")
 		os.Exit(1)
 	}
 
@@ -205,8 +207,23 @@ func runAgent(args []string) {
 			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", a.ID, a.Name, a.Status, a.WorkspacePath, a.UpdatedAt)
 		}
 		w.Flush()
+	case "heartbeat":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent heartbeat <name>")
+			os.Exit(1)
+		}
+		agent, err := store.HeartbeatAgent(args[1])
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error updating agent heartbeat: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Heartbeat updated for agent %q at %s\n", agent.Name, agent.LastHeartbeat)
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name>]")
 		os.Exit(1)
 	}
 }
@@ -219,7 +236,7 @@ func runMainEnv(args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | run-next [mode] [ttl] | release [success|failed] [result-json] | reclaim-stale]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | run-next [mode] [ttl] | renew [ttl] | release [success|failed] [result-json] | reclaim-stale]")
 		os.Exit(1)
 	}
 
@@ -357,6 +374,30 @@ func runMainEnv(args []string) {
 			fmt.Printf("Error: %s\n", result.Error)
 		}
 		os.Exit(1)
+	case "renew":
+		ttl := 10 * time.Minute
+		if len(args) >= 2 {
+			parsedTTL, err := time.ParseDuration(args[1])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Invalid ttl %q: %v\n", args[1], err)
+				os.Exit(1)
+			}
+			ttl = parsedTTL
+		}
+		if len(args) > 2 {
+			fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv renew [ttl]")
+			os.Exit(1)
+		}
+		lease, err := store.RenewMainEnvLease(ttl)
+		if err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Error renewing main environment lease: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Renewed main environment lease for %q to %s\n", lease.HolderAgentName, lease.ExpiresAt)
 	case "release":
 		markFailed := false
 		result := ""
@@ -407,7 +448,7 @@ func runMainEnv(args []string) {
 		}
 		fmt.Println("No stale main environment lease found.")
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | run-next [mode] [ttl] | release [success|failed] [result-json] | reclaim-stale]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager mainenv [status | request <agent-name> <request-type> [payload-json] | queue | grant-next [mode] [ttl] | run-next [mode] [ttl] | renew [ttl] | release [success|failed] [result-json] | reclaim-stale]")
 		os.Exit(1)
 	}
 }
