@@ -266,7 +266,7 @@ func runAgent(args []string) {
 			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent status <name>")
 			os.Exit(1)
 		}
-		agent, pidAlive, err := store.AgentStatus(args[1])
+		agent, runtimeAlive, err := store.AgentStatus(args[1])
 		if err != nil {
 			if errors.Is(err, orchestrator.ErrNotInitialized) {
 				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
@@ -283,9 +283,11 @@ func runAgent(args []string) {
 			fmt.Printf("Session ID: %s\n", agent.SessionID)
 		}
 		if _, hasPID := orchestrator.ParseAgentPIDSessionID(agent.SessionID); hasPID {
-			fmt.Printf("PID alive: %t\n", pidAlive)
+			fmt.Printf("PID alive: %t\n", runtimeAlive)
+		} else if _, hasTmux := orchestrator.ParseAgentTmuxSessionID(agent.SessionID); hasTmux {
+			fmt.Printf("TMUX session alive: %t\n", runtimeAlive)
 		} else {
-			fmt.Println("PID alive: n/a")
+			fmt.Println("Runtime alive: n/a")
 		}
 		fmt.Printf("Workspace: %s\n", agent.WorkspacePath)
 		fmt.Printf("Updated at: %s\n", agent.UpdatedAt)

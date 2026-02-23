@@ -152,8 +152,9 @@ Registered agents persist in `~/.claude/claude-manager/orchestrator.db`, so reop
 | `r` | Refresh orchestrator data |
 | `a` | Open Add Agent form (name + workspace) |
 | `↑`/`k`, `↓`/`j` | Move selected agent |
-| `s` | Start selected agent (`claude`) |
-| `S` | Start all non-running agents (`claude`) |
+| `Enter` / `v` | Attach to selected agent tmux session |
+| `s` | Start selected agent in tmux (`claude`) |
+| `S` | Start all non-running agents in tmux (`claude`) |
 | `x` | Stop selected agent (SIGTERM) |
 | `X` | Force stop selected agent |
 | `h` | Heartbeat selected agent |
@@ -166,6 +167,8 @@ Registered agents persist in `~/.claude/claude-manager/orchestrator.db`, so reop
 | `l` | Release lease as success |
 
 Press `a` to open the Add Agent form inside orchestrator mode, then use `Tab`/`Shift+Tab` to switch fields, `Enter` to submit, or `Esc` to cancel.
+
+After starting an agent, use `Enter` (or `v`) to attach to its tmux session; detach with `Ctrl+b` then `d` to return to cm.
 
 The orchestration screen shows:
 - Main env lease summary: active, holder, mode, expires, queue depth

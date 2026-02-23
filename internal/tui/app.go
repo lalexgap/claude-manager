@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -57,6 +58,11 @@ const (
 	orchestratorAddFieldCount
 )
 
+type orchestratorAttachDoneMsg struct {
+	agentName string
+	err       error
+}
+
 type projectEntry struct {
 	Name string
 	Path string
@@ -102,6 +108,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSearchKey(msg)
 		}
 		return m.handleNormalKey(msg)
+
+	case orchestratorAttachDoneMsg:
+		if msg.err != nil {
+			m.orchestratorStatus = fmt.Sprintf("Attach failed for %q: %v", msg.agentName, msg.err)
+			return m, nil
+		}
+		if err := m.refreshOrchestratorData(); err != nil {
+			m.orchestratorStatus = fmt.Sprintf("Detached from %q; refresh failed: %v", msg.agentName, err)
+			return m, nil
+		}
+		m.orchestratorStatus = fmt.Sprintf("Detached from %q.", msg.agentName)
+		return m, nil
 	}
 
 	return m, nil
@@ -288,6 +306,8 @@ func (m Model) handleOrchestratorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.orchestratorCursor = len(m.orchestratorAgents) - 1
 		}
 		return m, nil
+	case "enter", "v":
+		return m.runOrchestratorAttachSelected()
 	case "s":
 		return m.runOrchestratorStartSelected(), nil
 	case "S":
@@ -855,6 +875,26 @@ func (m Model) selectedOrchestratorAgent() (orchestrator.Agent, bool) {
 	return m.orchestratorAgents[m.orchestratorCursor], true
 }
 
+func (m Model) runOrchestratorAttachSelected() (Model, tea.Cmd) {
+	agent, ok := m.selectedOrchestratorAgent()
+	if !ok {
+		m.orchestratorStatus = "No agent selected."
+		return m, nil
+	}
+
+	tmuxName, isTmux := orchestrator.ParseAgentTmuxSessionID(agent.SessionID)
+	if !isTmux {
+		m.orchestratorStatus = fmt.Sprintf("Agent %q is not running in tmux. Start it with s/S first.", agent.Name)
+		return m, nil
+	}
+
+	m.orchestratorStatus = fmt.Sprintf("Attaching to %q (%s). Detach with Ctrl+b then d.", agent.Name, tmuxName)
+	cmd := exec.Command("tmux", "attach-session", "-t", tmuxName)
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return orchestratorAttachDoneMsg{agentName: agent.Name, err: err}
+	})
+}
+
 func (m Model) runOrchestratorStartSelected() Model {
 	agent, ok := m.selectedOrchestratorAgent()
 	if !ok {
@@ -865,7 +905,7 @@ func (m Model) runOrchestratorStartSelected() Model {
 	var started orchestrator.Agent
 	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
 		var err error
-		started, err = store.StartAgentProcess(agent.Name, []string{"claude"})
+		started, err = store.StartAgentTmux(agent.Name, []string{"claude"})
 		return err
 	})
 	if err != nil {
@@ -893,11 +933,25 @@ func (m Model) runOrchestratorStartAllAgents() Model {
 
 	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
 		for _, agent := range m.orchestratorAgents {
-			if strings.EqualFold(agent.Status, "running") {
-				skippedRunning++
+			current, alive, err := store.AgentStatus(agent.Name)
+			if err != nil {
+				failed++
+				if len(failureSamples) < 2 {
+					failureSamples = append(failureSamples, fmt.Sprintf("%s: %v", agent.Name, err))
+				}
 				continue
 			}
-			if _, err := store.StartAgentProcess(agent.Name, []string{"claude"}); err != nil {
+			if alive {
+				if _, hasPID := orchestrator.ParseAgentPIDSessionID(current.SessionID); hasPID {
+					skippedRunning++
+					continue
+				}
+				if _, hasTmux := orchestrator.ParseAgentTmuxSessionID(current.SessionID); hasTmux {
+					skippedRunning++
+					continue
+				}
+			}
+			if _, err := store.StartAgentTmux(agent.Name, []string{"claude"}); err != nil {
 				failed++
 				if len(failureSamples) < 2 {
 					failureSamples = append(failureSamples, fmt.Sprintf("%s: %v", agent.Name, err))
@@ -1204,7 +1258,7 @@ func (m Model) renderOrchestrator() string {
 	}
 	b.WriteString(statusBarStyle.Width(m.width).Render(" " + truncate(status, max(20, m.width-2))))
 	b.WriteString("\n")
-	help := "Esc back • q quit • r refresh • a add-agent • ↑↓/j/k select • s start • S start-all • x stop • X force-stop • h heartbeat • f queue specs • d queue dev status • D queue dev start • n grant-next • R run-next • u renew • l release"
+	help := "Esc back • q quit • r refresh • a add-agent • ↑↓/j/k select • Enter/v attach • s start • S start-all • x stop • X force-stop • h heartbeat • f queue specs • d queue dev status • D queue dev start • n grant-next • R run-next • u renew • l release"
 	b.WriteString(helpStyle.Render(truncate(help, max(20, m.width-2))))
 	return b.String()
 }
