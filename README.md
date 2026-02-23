@@ -146,6 +146,7 @@ Agent runtime logs are written to:
 | `Esc` | Return to normal session view |
 | `q` | Quit app |
 | `r` | Refresh orchestrator data |
+| `a` | Open Add Agent form (name + workspace) |
 | `↑`/`k`, `↓`/`j` | Move selected agent |
 | `s` | Start selected agent (`claude`) |
 | `S` | Start all non-running agents (`claude`) |
@@ -159,6 +160,8 @@ Agent runtime logs are written to:
 | `R` | `run-next` (`mode=normal`, `ttl=10m`) via gateway config |
 | `u` | Renew active lease (`10m`) |
 | `l` | Release lease as success |
+
+Press `a` to open the Add Agent form inside orchestrator mode, then use `Tab`/`Shift+Tab` to switch fields, `Enter` to submit, or `Esc` to cancel.
 
 The orchestration screen shows:
 - Main env lease summary: active, holder, mode, expires, queue depth

@@ -46,7 +46,16 @@ type Model struct {
 	orchestratorQueue      []orchestrator.MainEnvRequest
 	orchestratorCursor     int
 	orchestratorStatus     string
+	orchestratorAdding     bool
+	orchestratorAddFocus   int
+	orchestratorAddInputs  []textinput.Model
 }
+
+const (
+	orchestratorAddFieldName = iota
+	orchestratorAddFieldWorkspace
+	orchestratorAddFieldCount
+)
 
 type projectEntry struct {
 	Name string
@@ -241,6 +250,10 @@ func (m Model) handleWorktreeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleOrchestratorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.orchestratorAdding {
+		return m.handleOrchestratorAddKey(msg)
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -254,6 +267,9 @@ func (m Model) handleOrchestratorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.orchestratorStatus = "Refreshed orchestrator state."
 		}
 		return m, nil
+	case "a":
+		m = m.openOrchestratorAddForm()
+		return m, textinput.Blink
 	case "up", "k":
 		if m.orchestratorCursor > 0 {
 			m.orchestratorCursor--
@@ -298,6 +314,160 @@ func (m Model) handleOrchestratorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.runOrchestratorReleaseSuccess(), nil
 	}
 	return m, nil
+}
+
+func (m Model) handleOrchestratorAddKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.orchestratorAdding = false
+		m.orchestratorAddInputs = nil
+		return m, nil
+	case "tab":
+		m = m.setOrchestratorAddFocus((m.orchestratorAddFocus + 1) % orchestratorAddFieldCount)
+		return m, nil
+	case "shift+tab", "backtab":
+		next := m.orchestratorAddFocus - 1
+		if next < 0 {
+			next = orchestratorAddFieldCount - 1
+		}
+		m = m.setOrchestratorAddFocus(next)
+		return m, nil
+	case "enter":
+		return m.runOrchestratorAddAgent(), nil
+	default:
+		if len(m.orchestratorAddInputs) != orchestratorAddFieldCount {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.orchestratorAddInputs[m.orchestratorAddFocus], cmd = m.orchestratorAddInputs[m.orchestratorAddFocus].Update(msg)
+		return m, cmd
+	}
+}
+
+func (m Model) openOrchestratorAddForm() Model {
+	workspace := m.defaultOrchestratorWorkspace()
+	defaultName := defaultOrchestratorAgentName(workspace)
+
+	nameInput := textinput.New()
+	nameInput.Prompt = ""
+	nameInput.Placeholder = "agent name"
+	nameInput.CharLimit = 80
+	nameInput.SetValue(defaultName)
+
+	workspaceInput := textinput.New()
+	workspaceInput.Prompt = ""
+	workspaceInput.Placeholder = "workspace path"
+	workspaceInput.CharLimit = 512
+	workspaceInput.SetValue(workspace)
+
+	m.orchestratorAddInputs = []textinput.Model{nameInput, workspaceInput}
+	m.orchestratorAdding = true
+	m = m.setOrchestratorAddFocus(orchestratorAddFieldName)
+	return m
+}
+
+func (m Model) setOrchestratorAddFocus(idx int) Model {
+	if len(m.orchestratorAddInputs) != orchestratorAddFieldCount {
+		return m
+	}
+	if idx < 0 || idx >= orchestratorAddFieldCount {
+		idx = 0
+	}
+	m.orchestratorAddFocus = idx
+	for i := range m.orchestratorAddInputs {
+		if i == idx {
+			m.orchestratorAddInputs[i].Focus()
+			continue
+		}
+		m.orchestratorAddInputs[i].Blur()
+	}
+	return m
+}
+
+func (m Model) runOrchestratorAddAgent() Model {
+	if len(m.orchestratorAddInputs) != orchestratorAddFieldCount {
+		m.orchestratorStatus = "Add Agent form is unavailable."
+		m.orchestratorAdding = false
+		return m
+	}
+
+	name := strings.TrimSpace(m.orchestratorAddInputs[orchestratorAddFieldName].Value())
+	workspace := strings.TrimSpace(m.orchestratorAddInputs[orchestratorAddFieldWorkspace].Value())
+
+	var added orchestrator.Agent
+	err := m.withOrchestratorStore(func(store *orchestrator.Store) error {
+		var err error
+		added, err = store.AddAgent(name, workspace)
+		return err
+	})
+	if err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Add agent failed: %v", err)
+		return m
+	}
+
+	m.orchestratorAdding = false
+	m.orchestratorAddInputs = nil
+	if err := m.refreshOrchestratorData(); err != nil {
+		m.orchestratorStatus = fmt.Sprintf("Added %q; refresh failed: %v", added.Name, err)
+		return m
+	}
+	m.orchestratorStatus = fmt.Sprintf("Added agent %q (%s).", added.Name, added.WorkspacePath)
+	return m
+}
+
+func (m Model) defaultOrchestratorWorkspace() string {
+	if m.cursor >= 0 && m.cursor < len(m.filteredSessions) {
+		if path := strings.TrimSpace(m.filteredSessions[m.cursor].ProjectPath); path != "" {
+			return path
+		}
+	}
+	if path := strings.TrimSpace(m.cwd); path != "" {
+		return path
+	}
+	return ""
+}
+
+func defaultOrchestratorAgentName(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return ""
+	}
+	base := filepath.Base(workspace)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	cleanBase := sanitizeOrchestratorAgentNamePart(base)
+	if cleanBase == "" {
+		return ""
+	}
+	return cleanBase + "-agent"
+}
+
+func sanitizeOrchestratorAgentNamePart(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	lastDash := false
+	for _, r := range raw {
+		isLetter := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if isLetter || isDigit {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteRune('-')
+			lastDash = true
+		}
+	}
+
+	return strings.Trim(b.String(), "-")
 }
 
 func (m Model) buildProjectList() []projectEntry {
@@ -1023,6 +1193,10 @@ func (m Model) renderOrchestrator() string {
 	b.WriteString("\n")
 	b.WriteString(m.renderOrchestratorQueue(queueHeight))
 	b.WriteString("\n")
+	if m.orchestratorAdding {
+		b.WriteString(m.renderOrchestratorAddForm())
+		b.WriteString("\n")
+	}
 
 	status := m.orchestratorStatus
 	if strings.TrimSpace(status) == "" {
@@ -1030,7 +1204,7 @@ func (m Model) renderOrchestrator() string {
 	}
 	b.WriteString(statusBarStyle.Width(m.width).Render(" " + truncate(status, max(20, m.width-2))))
 	b.WriteString("\n")
-	help := "Esc back • q quit • r refresh • ↑↓/j/k select • s start • S start-all • x stop • X force-stop • h heartbeat • f queue specs • d queue dev status • D queue dev start • n grant-next • R run-next • u renew • l release"
+	help := "Esc back • q quit • r refresh • a add-agent • ↑↓/j/k select • s start • S start-all • x stop • X force-stop • h heartbeat • f queue specs • d queue dev status • D queue dev start • n grant-next • R run-next • u renew • l release"
 	b.WriteString(helpStyle.Render(truncate(help, max(20, m.width-2))))
 	return b.String()
 }
@@ -1058,7 +1232,7 @@ func (m Model) renderOrchestratorAgents(height int) string {
 		rows = 1
 	}
 	if len(m.orchestratorAgents) == 0 {
-		b.WriteString(lipgloss.NewStyle().Foreground(dimText).PaddingLeft(1).Render("No agents found. Add agents via CLI: claude-manager agent add <name> <workspace>"))
+		b.WriteString(lipgloss.NewStyle().Foreground(dimText).PaddingLeft(1).Render("No agents found. Press a to add one (or use CLI: claude-manager agent add <name> <workspace>)."))
 		return b.String()
 	}
 
@@ -1135,6 +1309,47 @@ func (m Model) renderOrchestratorQueue(height int) string {
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m Model) renderOrchestratorAddForm() string {
+	if len(m.orchestratorAddInputs) != orchestratorAddFieldCount {
+		return ""
+	}
+
+	width := m.width - 8
+	if width > 96 {
+		width = 96
+	}
+	if width < 40 {
+		width = 40
+	}
+
+	inputWidth := width - 22
+	if inputWidth < 16 {
+		inputWidth = 16
+	}
+
+	nameInput := m.orchestratorAddInputs[orchestratorAddFieldName]
+	workspaceInput := m.orchestratorAddInputs[orchestratorAddFieldWorkspace]
+	nameInput.Width = inputWidth
+	workspaceInput.Width = inputWidth
+
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(highlight).Render("Add Agent"))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("%-16s %s", "Agent Name", nameInput.View()))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("%-16s %s", "Workspace Path", workspaceInput.View()))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(dimText).Render("Tab/Shift+Tab switch fields • Enter submit • Esc cancel"))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(highlight).
+		Padding(0, 1).
+		MarginLeft(1).
+		Width(width).
+		Render(b.String())
 }
 
 func (m Model) renderWorktrees() string {
