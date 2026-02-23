@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -51,6 +52,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  claude-manager agent add <name> <workspace>")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent list")
 	fmt.Fprintln(os.Stderr, "  claude-manager agent heartbeat <name>")
+	fmt.Fprintln(os.Stderr, "  claude-manager agent heartbeat-loop <name> [interval]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv status")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv request <agent-name> <request-type> [payload-json]")
 	fmt.Fprintln(os.Stderr, "  claude-manager mainenv queue")
@@ -171,7 +173,7 @@ func runAgent(args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name>]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name> | heartbeat-loop <name> [interval]]")
 		os.Exit(1)
 	}
 
@@ -222,8 +224,30 @@ func runAgent(args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("Heartbeat updated for agent %q at %s\n", agent.Name, agent.LastHeartbeat)
+	case "heartbeat-loop":
+		if len(args) < 2 || len(args) > 3 {
+			fmt.Fprintln(os.Stderr, "Usage: claude-manager agent heartbeat-loop <name> [interval]")
+			os.Exit(1)
+		}
+		interval := 15 * time.Second
+		if len(args) == 3 {
+			parsed, err := time.ParseDuration(args[2])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Invalid interval %q: %v\n", args[2], err)
+				os.Exit(1)
+			}
+			interval = parsed
+		}
+		if err := runAgentHeartbeatLoop(store, args[1], interval); err != nil {
+			if errors.Is(err, orchestrator.ErrNotInitialized) {
+				fmt.Fprintln(os.Stderr, "Orchestrator database is not initialized. Run: claude-manager orchestrator init")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Heartbeat loop failed: %v\n", err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name>]")
+		fmt.Fprintln(os.Stderr, "Usage: claude-manager agent [add <name> <workspace> | list | heartbeat <name> | heartbeat-loop <name> [interval]]")
 		os.Exit(1)
 	}
 }
@@ -357,7 +381,13 @@ func runMainEnv(args []string) {
 			return
 		}
 
+		stopAutoRenew := startMainEnvAutoRenewLoop(store, ttl)
 		result := orchestrator.ExecuteMainEnvRequest(*req, cfg)
+		autoRenewErr := stopAutoRenew()
+		if autoRenewErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: auto-renew loop error: %v\n", autoRenewErr)
+		}
+
 		resultJSON, _ := json.Marshal(result)
 		releaseErr := store.ReleaseMainEnv(string(resultJSON), !result.Success)
 		if releaseErr != nil {
@@ -475,6 +505,84 @@ func parseMainEnvGrantArgs(args []string, commandName string) (string, time.Dura
 	}
 
 	return mode, ttl, nil
+}
+
+func runAgentHeartbeatLoop(store *orchestrator.Store, agentName string, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("interval must be greater than zero")
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	heartbeat := func() error {
+		agent, err := store.HeartbeatAgent(agentName)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("[%s] heartbeat updated for %q\n", time.Now().Format(time.RFC3339), agent.Name)
+		return nil
+	}
+
+	if err := heartbeat(); err != nil {
+		return err
+	}
+	fmt.Printf("Running heartbeat loop for %q every %s (Ctrl+C to stop)\n", agentName, interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := heartbeat(); err != nil {
+				return err
+			}
+		case <-sigCh:
+			fmt.Println("Heartbeat loop stopped.")
+			return nil
+		}
+	}
+}
+
+func startMainEnvAutoRenewLoop(store *orchestrator.Store, ttl time.Duration) func() error {
+	interval := ttl / 2
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	if interval < 1*time.Second {
+		interval = 1 * time.Second
+	}
+
+	stopCh := make(chan struct{})
+	doneCh := make(chan error, 1)
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if _, err := store.RenewMainEnvLease(ttl); err != nil {
+					if strings.Contains(err.Error(), "no active holder") {
+						continue
+					}
+					doneCh <- err
+					return
+				}
+			case <-stopCh:
+				doneCh <- nil
+				return
+			}
+		}
+	}()
+
+	return func() error {
+		close(stopCh)
+		return <-doneCh
+	}
 }
 
 func startNewSession(projectPath string, skipPermissions bool, useWorktree bool) {

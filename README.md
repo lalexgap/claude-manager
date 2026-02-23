@@ -47,6 +47,9 @@ claude-manager agent list
 # Agent heartbeat (updates agent + lease heartbeat timestamps)
 claude-manager agent heartbeat <name>
 
+# Keep heartbeats flowing on an interval (default every 15s)
+claude-manager agent heartbeat-loop <name> [interval]
+
 # Show main environment lease + queue depth
 claude-manager mainenv status
 
@@ -61,6 +64,7 @@ claude-manager mainenv queue
 claude-manager mainenv grant-next [mode] [ttl]
 
 # Grant + execute oldest queued request via gateway commands
+# (auto-renews lease while command is running)
 claude-manager mainenv run-next [mode] [ttl]
 
 # Extend the active lease (default ttl=10m)
