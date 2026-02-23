@@ -131,8 +131,7 @@ Agent runtime logs are written to:
 | `Enter` | Resume selected session |
 | `n` | Start a new session (choose project) |
 | `o` | Open orchestration mode |
-| `w` | Toggle Claude `--worktree` mode for resume/new session |
-| `t` | Show worktree mode info |
+| `w`/`t` | Show worktree mode info |
 | `/` | Search (use `@repo` to filter by project) |
 | `Tab` | Toggle full-text search (in search mode) |
 | `!` | Toggle `--dangerously-skip-permissions` |
@@ -168,9 +167,13 @@ The orchestration screen shows:
 
 ## Worktree mode
 
-When worktree mode is enabled (`w`), claude-manager calls Claude Code with `--worktree` and lets Claude manage worktree creation/selection.
+claude-manager always calls Claude Code with `--worktree` for new sessions and resumed sessions.
+
+Claude manages worktree creation/selection automatically.
 
 claude-manager no longer creates git worktrees or session symlinks directly.
+
+Use orchestrator mode (`o`) to coordinate access to the main environment.
 
 ## Search
 

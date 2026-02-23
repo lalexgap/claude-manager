@@ -64,6 +64,7 @@ func NewModel(ss []sessions.Session, cwd string) Model {
 		filteredSessions: ss,
 		search:           ti,
 		cwd:              cwd,
+		UseWorktree:      true, // always run sessions in a worktree
 	}
 }
 
@@ -197,11 +198,7 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.SkipPermissions = !m.SkipPermissions
 		return m, nil
 
-	case "w":
-		m.UseWorktree = !m.UseWorktree
-		return m, nil
-
-	case "t":
+	case "w", "t":
 		m.showWorktrees = true
 		return m, nil
 
@@ -354,8 +351,8 @@ func (m Model) handleNewSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.SkipPermissions = !m.SkipPermissions
 		return m, nil
 
-	case "w":
-		m.UseWorktree = !m.UseWorktree
+	case "w", "t":
+		m.showWorktrees = true
 		return m, nil
 
 	case "enter":
@@ -409,7 +406,7 @@ func (m Model) renderNewSession() string {
 	// Status indicators
 	var flags []string
 	if m.UseWorktree {
-		flags = append(flags, "🌳 worktree")
+		flags = append(flags, "🌳 worktree (always)")
 	}
 	if m.SkipPermissions {
 		flags = append(flags, "⚡ skip-permissions")
@@ -420,7 +417,7 @@ func (m Model) renderNewSession() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑↓ navigate • enter select • ! skip-perms • w worktree • Esc back • q quit"))
+	b.WriteString(helpStyle.Render("↑↓ navigate • enter select • ! skip-perms • t worktree info • Esc back • q quit"))
 	return b.String()
 }
 
@@ -582,7 +579,7 @@ func (m Model) View() string {
 		status += fmt.Sprintf(" (of %d)", len(m.allSessions))
 	}
 	if m.UseWorktree {
-		status += "  🌳 worktree"
+		status += "  🌳 worktree (always)"
 	}
 	if m.SkipPermissions {
 		status += "  ⚡ skip-permissions"
@@ -591,7 +588,7 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • n new session • o orchestrator • w worktree • t worktree info • / search • ! skip-perms • ? help • q quit"
+	help := "↑↓ navigate • enter resume • n new session • o orchestrator • t worktree info • / search • ! skip-perms • ? help • q quit"
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -1101,10 +1098,11 @@ func (m Model) renderWorktrees() string {
 	lines := []string{
 		"Worktree mode now uses Claude Code built-in support.",
 		"",
-		"When enabled (w), claude-manager starts Claude with --worktree.",
+		"claude-manager always starts Claude with --worktree.",
 		"Claude creates/manages the worktree automatically for new or resumed sessions.",
 		"",
 		"claude-manager no longer creates git worktrees or session symlinks itself.",
+		"The main environment should be controlled via orchestrator actions.",
 	}
 	for _, line := range lines {
 		b.WriteString(lipgloss.NewStyle().Foreground(white).Padding(0, 2).Render(line))
@@ -1130,8 +1128,7 @@ func (m Model) renderHelp() string {
 		{"Enter", "Resume selected session"},
 		{"n", "New session (choose project)"},
 		{"o", "Open orchestrator mode"},
-		{"w", "Toggle Claude --worktree mode"},
-		{"t", "Show worktree mode info"},
+		{"w/t", "Show worktree mode info"},
 		{"/", "Search (@repo to filter by project)"},
 		{"Tab", "Toggle full-text search (in search mode)"},
 		{"!", "Toggle --dangerously-skip-permissions"},

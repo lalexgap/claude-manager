@@ -94,7 +94,7 @@ func runTUI() {
 	final := result.(tui.Model)
 
 	if path := final.NewSessionPath(); path != "" {
-		startNewSession(path, final.SkipPermissions, final.UseWorktree)
+		startNewSession(path, final.SkipPermissions)
 		return
 	}
 
@@ -103,7 +103,7 @@ func runTUI() {
 		return
 	}
 
-	resumeSession(*selected, final.SkipPermissions, final.UseWorktree)
+	resumeSession(*selected, final.SkipPermissions)
 }
 
 func runList() {
@@ -124,7 +124,7 @@ func runResume(sessionID string) {
 
 	for _, s := range ss {
 		if s.ID == sessionID {
-			resumeSession(s, false, false)
+			resumeSession(s, false)
 			return
 		}
 	}
@@ -659,7 +659,7 @@ func startMainEnvAutoRenewLoop(store *orchestrator.Store, ttl time.Duration) fun
 	}
 }
 
-func startNewSession(projectPath string, skipPermissions bool, useWorktree bool) {
+func startNewSession(projectPath string, skipPermissions bool) {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
@@ -673,10 +673,7 @@ func startNewSession(projectPath string, skipPermissions bool, useWorktree bool)
 
 	fmt.Printf("Starting new session in %s...\n", projectPath)
 
-	claudeArgs := []string{"claude"}
-	if useWorktree {
-		claudeArgs = append(claudeArgs, "--worktree")
-	}
+	claudeArgs := []string{"claude", "--worktree"}
 	if skipPermissions {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}
@@ -688,7 +685,7 @@ func startNewSession(projectPath string, skipPermissions bool, useWorktree bool)
 	}
 }
 
-func resumeSession(s sessions.Session, skipPermissions bool, useWorktree bool) {
+func resumeSession(s sessions.Session, skipPermissions bool) {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
@@ -706,10 +703,7 @@ func resumeSession(s sessions.Session, skipPermissions bool, useWorktree bool) {
 	fmt.Printf("Resuming session in %s...\n", s.ProjectPath)
 
 	// Build claude args
-	claudeArgs := []string{"claude", "-r", s.ID}
-	if useWorktree {
-		claudeArgs = append(claudeArgs, "--worktree")
-	}
+	claudeArgs := []string{"claude", "-r", s.ID, "--worktree"}
 	if skipPermissions {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}
