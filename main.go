@@ -135,6 +135,18 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 		os.Exit(1)
 	}
 
+	// If the stored project path no longer exists (e.g. a deleted worktree),
+	// fall back to the current working directory for git operations.
+	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: project directory not found (%s), using current directory\n", projectPath)
+		projectPath = cwd
+	}
+
 	// Find git repo root
 	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
@@ -306,8 +318,7 @@ func resumeSession(s sessions.Session, skipPermissions bool) {
 	// Change to the project directory
 	if s.ProjectPath != "" {
 		if err := os.Chdir(s.ProjectPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error changing to %s: %v\n", s.ProjectPath, err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Warning: project directory not found (%s), resuming from current directory\n", s.ProjectPath)
 		}
 	}
 
