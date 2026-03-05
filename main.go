@@ -33,12 +33,19 @@ func main() {
 	switch {
 	case len(rest) == 0:
 		runTUI(skipPerms, useWorktree)
+	case rest[0] == "n":
+		cwd, _ := os.Getwd()
+		if useWorktree {
+			worktreeNewSession(cwd, skipPerms)
+		} else {
+			startNewSession(cwd, skipPerms)
+		}
 	case rest[0] == "list":
 		runList()
 	case rest[0] == "resume" && len(rest) >= 2:
 		runResume(rest[1])
 	default:
-		fmt.Fprintf(os.Stderr, "Usage: claude-manager [! w] [list | resume <session-id>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: claude-manager [! w] [n | list | resume <session-id>]\n")
 		os.Exit(1)
 	}
 }

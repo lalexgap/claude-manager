@@ -18,27 +18,44 @@ type Entry struct {
 }
 
 // Discover collects worktree entries across all unique repo roots from sessions.
+// Only worktrees registered with git (via git worktree list) are returned.
 func Discover(ss []sessions.Session) []Entry {
 	roots := uniqueRepoRoots(ss)
 	var entries []Entry
 	for _, root := range roots {
 		wtDir := root + "-worktrees"
-		dirEntries, err := os.ReadDir(wtDir)
-		if err != nil {
-			continue
-		}
-		for _, de := range dirEntries {
-			if !de.IsDir() {
+		for _, wt := range gitWorktrees(root) {
+			if !strings.HasPrefix(wt.path, wtDir+string(filepath.Separator)) {
 				continue
 			}
 			entries = append(entries, Entry{
-				Path:     filepath.Join(wtDir, de.Name()),
-				Branch:   de.Name(),
+				Path:     wt.path,
+				Branch:   filepath.Base(wt.path),
 				RepoRoot: root,
 			})
 		}
 	}
 	return entries
+}
+
+type gitWorktree struct {
+	path string
+}
+
+// gitWorktrees returns all worktrees registered with git for the given repo root.
+func gitWorktrees(repoRoot string) []gitWorktree {
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var wts []gitWorktree
+	for _, line := range strings.Split(string(out), "\n") {
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			wts = append(wts, gitWorktree{path: strings.TrimSpace(path)})
+		}
+	}
+	return wts
 }
 
 // Remove removes a worktree via git and cleans up the Claude session directory.

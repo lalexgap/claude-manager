@@ -173,6 +173,13 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 	s.LastActive = lastTimestamp
 	s.MessageText = strings.Join(messageTexts, "\n")
 
+	// Store last 3 user messages for context preview
+	if len(messageTexts) > 3 {
+		s.LastMessages = messageTexts[len(messageTexts)-3:]
+	} else {
+		s.LastMessages = messageTexts
+	}
+
 	if s.Summary == "" {
 		s.Summary = firstUserMessage
 	}

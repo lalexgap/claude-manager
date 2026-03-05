@@ -135,12 +135,12 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.applyFilters()
 		return m, nil
 
-	case "enter":
+	case "enter", "tab":
 		m.searching = false
 		m.search.Blur()
 		return m, nil
 
-	case "tab":
+	case "ctrl+f":
 		m.fullTextSearch = !m.fullTextSearch
 		m.applyFilters()
 		return m, nil
@@ -504,7 +504,13 @@ func (m Model) View() string {
 	headerHeight := 4 // title + search + borders
 	helpBarHeight := 1
 	statusHeight := 1
-	detailHeight := 10
+	detailHeight := m.height * 2 / 5
+	if detailHeight < 10 {
+		detailHeight = 10
+	}
+	if detailHeight > 18 {
+		detailHeight = 18
+	}
 
 	listHeight := m.height - headerHeight - helpBarHeight - statusHeight - detailHeight - 1
 	if listHeight < 5 {
@@ -564,7 +570,12 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	// Help bar
-	help := "↑↓ navigate • enter resume • n new session • w worktree • t worktrees • / search • ! skip-perms • ? help • q quit"
+	var help string
+	if m.searching {
+		help = "tab/enter confirm • ctrl+f toggle full-text • esc cancel"
+	} else {
+		help = "↑↓ navigate • enter resume • n new session • w worktree • t worktrees • / search • ! skip-perms • ? help • q quit"
+	}
 	b.WriteString(helpStyle.Render(help))
 
 	return b.String()
@@ -635,7 +646,8 @@ func (m Model) renderHelp() string {
 		{"w", "Toggle worktree mode"},
 		{"t", "Manage worktrees"},
 		{"/", "Search (@repo to filter by project)"},
-		{"Tab", "Toggle full-text search (in search mode)"},
+		{"Tab/Enter", "Confirm search, focus session list"},
+		{"Ctrl+F", "Toggle full-text search (in search mode)"},
 		{"!", "Toggle --dangerously-skip-permissions"},
 		{"Esc", "Clear search / close help"},
 		{"?", "Toggle help"},
