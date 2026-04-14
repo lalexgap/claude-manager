@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,12 @@ type Session struct {
 	MessageText  string    // Concatenated user message text for full-text search
 	FirstMessage string    // First non-meta user message text
 	LastMessages []string  // Last few user messages for context preview
+}
+
+// IsWorktree returns true if this session is running inside a git worktree.
+func (s Session) IsWorktree() bool {
+	return strings.Contains(s.ProjectPath, "/.claude/worktrees/") ||
+		strings.Contains(s.ProjectPath, "-worktrees/")
 }
 
 // TimeAgo returns a human-readable relative time string.

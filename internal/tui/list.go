@@ -9,30 +9,43 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var (
+	worktreeIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C")).Render("wt")
+)
+
+// Column widths for the session list.
+const (
+	colProject = 16
+	colBranch  = 24
+	colWt      = 3
+	colTime    = 8
+	colGap     = 5 // spaces between columns
+)
+
 // renderSessionItem renders a single session row.
+// Layout: project(16) branch(24) wt(3) time(8) summary(remaining)
 // semanticScore is optional — if > 0, it's shown as a percentage.
 func renderSessionItem(s sessions.Session, width int, selected bool, semanticScore ...float64) string {
-	project := projectStyle.Render(truncate(s.Project, 16))
+	project := projectStyle.Width(colProject).Render(truncate(s.Project, colProject))
 
-	branch := ""
-	if s.GitBranch != "" {
-		branch = branchStyle.Render(truncate(s.GitBranch, 30))
+	branch := branchStyle.Width(colBranch).Render(truncate(s.GitBranch, colBranch))
+
+	wt := ""
+	if s.IsWorktree() {
+		wt = worktreeIndicator
 	}
+	wtCol := lipgloss.NewStyle().Width(colWt).Render(wt)
 
-	timeAgo := timeStyle.Render(s.TimeAgo())
-
-	score := ""
+	timeStr := s.TimeAgo()
 	if len(semanticScore) > 0 && semanticScore[0] > 0 {
-		pct := int(semanticScore[0] * 100)
-		score = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Render(fmt.Sprintf(" %d%%", pct))
+		timeStr = fmt.Sprintf("%d%%", int(semanticScore[0]*100))
 	}
+	timeCol := timeStyle.Width(colTime).Render(timeStr)
 
-	// Calculate remaining width for summary
-	// project(18) + branch(~32) + time(~10) + padding(~8)
-	rightSide := fmt.Sprintf(" %s  %s%s", branch, timeAgo, score)
-	summaryWidth := width - 18 - lipgloss.Width(rightSide) - 6
-	if summaryWidth < 20 {
-		summaryWidth = 20
+	fixedWidth := colProject + colBranch + colWt + colTime + colGap
+	summaryWidth := width - fixedWidth - 4 // padding
+	if summaryWidth < 10 {
+		summaryWidth = 10
 	}
 
 	displaySummary := s.Summary
@@ -41,7 +54,7 @@ func renderSessionItem(s sessions.Session, width int, selected bool, semanticSco
 	}
 	summary := summaryStyle.Render(truncate(displaySummary, summaryWidth))
 
-	line := fmt.Sprintf("%s %s%s", project, summary, rightSide)
+	line := fmt.Sprintf("%s %s %s %s %s", project, branch, wtCol, timeCol, summary)
 
 	if selected {
 		return selectedItemStyle.Render(line)

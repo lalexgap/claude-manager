@@ -151,14 +151,12 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 		projectPath = resolved
 	}
 
-	// Find git repo root
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding git root for %s: %v\n", projectPath, err)
+	// Find the main repo root (not a worktree checkout)
+	repoRoot := findMainRepoRoot(projectPath)
+	if repoRoot == "" {
+		fmt.Fprintf(os.Stderr, "Error finding git root for %s\n", projectPath)
 		os.Exit(1)
 	}
-	repoRoot := strings.TrimSpace(string(out))
 
 	// Build worktree path: <repoRoot>/.claude/worktrees/<sanitized-branch>
 	wtPath := worktree.Path(repoRoot, s.GitBranch)
@@ -222,18 +220,16 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 }
 
 func worktreeNewSession(projectPath string, skipPermissions bool) {
-	// Find git repo root
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
-	if err != nil {
+	// Find the main repo root (not a worktree checkout)
+	repoRoot := findMainRepoRoot(projectPath)
+	if repoRoot == "" {
 		fmt.Fprintf(os.Stderr, "Error: %s is not a git repository\n", projectPath)
 		os.Exit(1)
 	}
-	repoRoot := strings.TrimSpace(string(out))
 
 	// Get current branch
-	cmd = exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err = cmd.Output()
+	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error detecting branch in %s: %v\n", projectPath, err)
 		os.Exit(1)
@@ -304,6 +300,38 @@ func startNewSession(projectPath string, skipPermissions bool) {
 		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// findMainRepoRoot returns the main repository root, not a worktree checkout root.
+// Uses git-common-dir to find the real .git dir, then derives the repo root.
+func findMainRepoRoot(path string) string {
+	// First get the toplevel (could be a worktree)
+	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	toplevel := strings.TrimSpace(string(out))
+
+	// Get the common git dir (shared across all worktrees)
+	cmd = exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
+	out, err = cmd.Output()
+	if err != nil {
+		return toplevel
+	}
+	commonDir := strings.TrimSpace(string(out))
+
+	// If commonDir is absolute and ends in .git, the repo root is its parent
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(toplevel, commonDir)
+	}
+	commonDir = filepath.Clean(commonDir)
+
+	// .git dir is at <repo>/.git — parent is the repo root
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Dir(commonDir)
+	}
+	return toplevel
 }
 
 func resumeSession(s sessions.Session, skipPermissions bool) {

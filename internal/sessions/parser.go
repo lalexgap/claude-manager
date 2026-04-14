@@ -45,11 +45,36 @@ func claudeDir() (string, error) {
 
 // decodeProjectName converts an encoded directory name back to a readable name.
 // e.g., "-Users-lagap-code-producthunt" -> "producthunt"
+// e.g., "-Users-lagap-code-producthunt-.claude-worktrees-my-branch" -> "producthunt"
 func decodeProjectName(dirName string) string {
 	// The directory name is the path with / replaced by -
-	// We want just the last meaningful segment as the project name
+	// Claude also strips dots, so ".claude" becomes "-claude" (producing a "--claude" sequence).
 	parts := strings.Split(dirName, "-")
-	// Filter out empty parts and common path segments
+
+	// Find "worktrees" segment preceded by "claude" (with or without dot).
+	// The project name is the last non-empty part before the claude/worktrees segment.
+	for i, p := range parts {
+		if p == ".claude" || (p == "claude" && i > 0 && parts[i-1] == "") {
+			// Walk backwards from claude to find the project name
+			for j := i - 1; j >= 0; j-- {
+				if parts[j] != "" {
+					return parts[j]
+				}
+			}
+			break
+		}
+		// Also handle legacy layout: "producthunt-worktrees-branchname"
+		if p == "worktrees" && i > 0 {
+			for j := i - 1; j >= 0; j-- {
+				if parts[j] != "" {
+					return parts[j]
+				}
+			}
+			break
+		}
+	}
+
+	// No worktree segment — just take the last non-empty part
 	for i := len(parts) - 1; i >= 0; i-- {
 		if parts[i] != "" {
 			return parts[i]

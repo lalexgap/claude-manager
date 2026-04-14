@@ -112,11 +112,20 @@ func gitWorktrees(repoRoot string) []gitWorktree {
 
 // Create creates a new git worktree at {repoRoot}/.claude/worktrees/{sanitized-branch}
 // and runs any WorktreeCreate hooks configured in settings files.
+// If the branch is already checked out elsewhere, uses --detach to avoid conflicts.
 func Create(repoRoot, branch string) (string, error) {
 	worktreePath := Path(repoRoot, branch)
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", worktreePath, branch)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		// Branch already checked out — retry with --detach
+		if strings.Contains(string(out), "is already used by worktree") || strings.Contains(string(out), "is already checked out") {
+			cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", worktreePath, branch)
+			if out2, err2 := cmd.CombinedOutput(); err2 != nil {
+				return "", fmt.Errorf("%s: %s", err2, strings.TrimSpace(string(out2)))
+			}
+		} else {
+			return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 	runCreateHooks(repoRoot, worktreePath, branch)
 	return worktreePath, nil

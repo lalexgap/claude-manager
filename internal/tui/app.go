@@ -1001,12 +1001,8 @@ func (m Model) renderWorktrees() string {
 
 			branchCol := lipgloss.NewStyle().Foreground(special).Render(e.Branch)
 			sessionCol := ""
-			if e.SessionID != "" {
-				msg := e.SessionMsg
-				if len(msg) > 40 {
-					msg = msg[:37] + "..."
-				}
-				sessionCol = "  " + lipgloss.NewStyle().Foreground(dimText).Render(msg)
+			if e.SessionMsg != "" {
+				sessionCol = "  " + lipgloss.NewStyle().Foreground(dimText).Render(e.SessionMsg)
 			}
 
 			line := fmt.Sprintf("%s  %s%s",

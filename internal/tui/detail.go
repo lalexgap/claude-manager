@@ -40,6 +40,15 @@ func renderDetail(s sessions.Session, width, height int) string {
 		row("Session ID:", s.ID),
 	}
 
+	if s.FirstMessage != "" {
+		prompt := strings.Join(strings.Fields(s.FirstMessage), " ")
+		if len(prompt) > innerWidth*2 {
+			prompt = prompt[:innerWidth*2-3] + "..."
+		}
+		lines = append(lines, "", lipgloss.NewStyle().Foreground(dimText).Render("Initial prompt:"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(white).Render("  "+prompt))
+	}
+
 	// Inner height = height minus border (2) and padding (2)
 	innerHeight := height - 4
 	if len(s.LastMessages) > 0 && len(lines) < innerHeight-2 {
