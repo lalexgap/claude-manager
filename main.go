@@ -11,6 +11,7 @@ import (
 
 	"claude-manager/internal/sessions"
 	"claude-manager/internal/tui"
+	"claude-manager/internal/worktree"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -143,15 +144,11 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 	}
 
 	// If the stored project path no longer exists (e.g. a deleted worktree),
-	// fall back to the current working directory for git operations.
+	// resolve gracefully: recreate registered worktrees, or fall back to repo root.
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "Warning: project directory not found (%s), using current directory\n", projectPath)
-		projectPath = cwd
+		resolved := worktree.ResolveWorktreePath(projectPath)
+		fmt.Fprintf(os.Stderr, "Warning: project directory not found (%s), using %s\n", projectPath, resolved)
+		projectPath = resolved
 	}
 
 	// Find git repo root
@@ -163,22 +160,19 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 	}
 	repoRoot := strings.TrimSpace(string(out))
 
-	// Build worktree path: <repoRoot>-worktrees/<sanitized-branch>/
-	sanitizedBranch := strings.ReplaceAll(s.GitBranch, "/", "-")
-	worktreePath := filepath.Join(repoRoot+"-worktrees", sanitizedBranch)
+	// Build worktree path: <repoRoot>/.claude/worktrees/<sanitized-branch>
+	wtPath := worktree.Path(repoRoot, s.GitBranch)
 
 	// Create worktree if it doesn't exist
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		fmt.Printf("Creating worktree at %s for branch %s...\n", worktreePath, s.GitBranch)
-		cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-f", worktreePath, s.GitBranch)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
+		fmt.Printf("Creating worktree at %s for branch %s...\n", wtPath, s.GitBranch)
+		wtPath, err = worktree.Create(repoRoot, s.GitBranch)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating worktree: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
-		fmt.Printf("Reusing existing worktree at %s\n", worktreePath)
+		fmt.Printf("Reusing existing worktree at %s\n", wtPath)
 	}
 
 	// Symlink the session file so Claude can find it from the worktree path.
@@ -190,7 +184,7 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 		fmt.Fprintf(os.Stderr, "Error finding home dir: %v\n", err)
 		os.Exit(1)
 	}
-	worktreeEncoded := strings.ReplaceAll(worktreePath, "/", "-")
+	worktreeEncoded := strings.ReplaceAll(wtPath, "/", "-")
 	worktreeProjectDir := filepath.Join(homeDir, ".claude", "projects", worktreeEncoded)
 	if err := os.MkdirAll(worktreeProjectDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating project dir: %v\n", err)
@@ -203,8 +197,8 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 	}
 
 	// Chdir into worktree and exec claude
-	if err := os.Chdir(worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error changing to worktree %s: %v\n", worktreePath, err)
+	if err := os.Chdir(wtPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error changing to worktree %s: %v\n", wtPath, err)
 		os.Exit(1)
 	}
 
@@ -219,7 +213,7 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 		claudeArgs = append(claudeArgs, "--dangerously-skip-permissions")
 	}
 
-	fmt.Printf("Resuming session in worktree %s...\n", worktreePath)
+	fmt.Printf("Resuming session in worktree %s...\n", wtPath)
 	err = syscall.Exec(claudePath, claudeArgs, os.Environ())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
@@ -246,26 +240,23 @@ func worktreeNewSession(projectPath string, skipPermissions bool) {
 	}
 	branch := strings.TrimSpace(string(out))
 
-	// Build worktree path
-	sanitizedBranch := strings.ReplaceAll(branch, "/", "-")
-	worktreePath := filepath.Join(repoRoot+"-worktrees", sanitizedBranch)
+	// Compute worktree path: <repoRoot>/.claude/worktrees/<sanitized-branch>
+	wtPath := worktree.Path(repoRoot, branch)
 
 	// Create worktree if it doesn't exist
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		fmt.Printf("Creating worktree at %s for branch %s...\n", worktreePath, branch)
-		cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-f", worktreePath, branch)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
+		fmt.Printf("Creating worktree at %s for branch %s...\n", wtPath, branch)
+		wtPath, err = worktree.Create(repoRoot, branch)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating worktree: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
-		fmt.Printf("Reusing existing worktree at %s\n", worktreePath)
+		fmt.Printf("Reusing existing worktree at %s\n", wtPath)
 	}
 
-	if err := os.Chdir(worktreePath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error changing to worktree %s: %v\n", worktreePath, err)
+	if err := os.Chdir(wtPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error changing to worktree %s: %v\n", wtPath, err)
 		os.Exit(1)
 	}
 
@@ -275,7 +266,7 @@ func worktreeNewSession(projectPath string, skipPermissions bool) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Starting new session in worktree %s...\n", worktreePath)
+	fmt.Printf("Starting new session in worktree %s...\n", wtPath)
 
 	claudeArgs := []string{"claude"}
 	if skipPermissions {
@@ -322,10 +313,15 @@ func resumeSession(s sessions.Session, skipPermissions bool) {
 		os.Exit(1)
 	}
 
-	// Change to the project directory
+	// Change to the project directory, resolving missing paths (e.g. deleted worktrees).
 	if s.ProjectPath != "" {
-		if err := os.Chdir(s.ProjectPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: project directory not found (%s), resuming from current directory\n", s.ProjectPath)
+		projectPath := s.ProjectPath
+		if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+			projectPath = worktree.ResolveWorktreePath(projectPath)
+			fmt.Fprintf(os.Stderr, "Warning: project directory not found, using %s\n", projectPath)
+		}
+		if err := os.Chdir(projectPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not change to %s, resuming from current directory\n", projectPath)
 		}
 	}
 

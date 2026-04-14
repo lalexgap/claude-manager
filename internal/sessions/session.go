@@ -11,11 +11,13 @@ type Session struct {
 	Project      string    // Human-readable project name (decoded from directory)
 	ProjectPath  string    // Actual filesystem path (cwd from session data)
 	Summary      string    // From summary line, or first user message as fallback
+	LLMSummary   string    // AI-generated summary (from cache or API)
 	GitBranch    string    // Git branch at time of session
 	LastActive   time.Time // Timestamp of last message
 	MessageCount int       // Total user + assistant messages
 	FilePath     string    // Path to the .jsonl file
 	MessageText  string    // Concatenated user message text for full-text search
+	FirstMessage string    // First non-meta user message text
 	LastMessages []string  // Last few user messages for context preview
 }
 

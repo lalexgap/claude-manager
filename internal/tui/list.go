@@ -10,7 +10,8 @@ import (
 )
 
 // renderSessionItem renders a single session row.
-func renderSessionItem(s sessions.Session, width int, selected bool) string {
+// semanticScore is optional — if > 0, it's shown as a percentage.
+func renderSessionItem(s sessions.Session, width int, selected bool, semanticScore ...float64) string {
 	project := projectStyle.Render(truncate(s.Project, 16))
 
 	branch := ""
@@ -20,15 +21,25 @@ func renderSessionItem(s sessions.Session, width int, selected bool) string {
 
 	timeAgo := timeStyle.Render(s.TimeAgo())
 
+	score := ""
+	if len(semanticScore) > 0 && semanticScore[0] > 0 {
+		pct := int(semanticScore[0] * 100)
+		score = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Render(fmt.Sprintf(" %d%%", pct))
+	}
+
 	// Calculate remaining width for summary
 	// project(18) + branch(~32) + time(~10) + padding(~8)
-	rightSide := fmt.Sprintf(" %s  %s", branch, timeAgo)
+	rightSide := fmt.Sprintf(" %s  %s%s", branch, timeAgo, score)
 	summaryWidth := width - 18 - lipgloss.Width(rightSide) - 6
 	if summaryWidth < 20 {
 		summaryWidth = 20
 	}
 
-	summary := summaryStyle.Render(truncate(s.Summary, summaryWidth))
+	displaySummary := s.Summary
+	if s.LLMSummary != "" {
+		displaySummary = s.LLMSummary
+	}
+	summary := summaryStyle.Render(truncate(displaySummary, summaryWidth))
 
 	line := fmt.Sprintf("%s %s%s", project, summary, rightSide)
 

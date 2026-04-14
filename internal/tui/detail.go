@@ -24,8 +24,13 @@ func renderDetail(s sessions.Session, width, height int) string {
 		)
 	}
 
+	headerText := s.Summary
+	if s.LLMSummary != "" {
+		headerText = s.LLMSummary
+	}
+
 	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(highlight).Render(s.Summary),
+		lipgloss.NewStyle().Bold(true).Foreground(highlight).Render(headerText),
 		"",
 		row("Project:", s.Project),
 		row("Path:", s.ProjectPath),

@@ -3,6 +3,7 @@ package sessions
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -180,6 +181,8 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 		s.LastMessages = messageTexts
 	}
 
+	s.FirstMessage = firstUserMessage
+
 	if s.Summary == "" {
 		s.Summary = firstUserMessage
 	}
@@ -193,6 +196,60 @@ func parseSessionFile(path string, projectName string) (*Session, error) {
 	}
 
 	return s, nil
+}
+
+// BuildSummaryContext reads a session's JSONL file and returns a numbered list
+// of sampled user messages for the summary generation prompt.
+// If >12 messages, takes first 4 + middle 4 + last 4 to cover the conversation arc.
+func BuildSummaryContext(filePath string) string {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var messages []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	for scanner.Scan() {
+		var entry jsonlEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type != "user" || entry.IsMeta {
+			continue
+		}
+		text := extractTextContent(entry.Message)
+		if text == "" {
+			continue
+		}
+		if len(text) > 300 {
+			text = text[:300]
+		}
+		messages = append(messages, text)
+	}
+
+	if len(messages) == 0 {
+		return ""
+	}
+
+	// Sample: first 4 + middle 4 + last 4 if >12
+	var sampled []string
+	if len(messages) <= 12 {
+		sampled = messages
+	} else {
+		sampled = append(sampled, messages[:4]...)
+		mid := len(messages) / 2
+		sampled = append(sampled, messages[mid-2:mid+2]...)
+		sampled = append(sampled, messages[len(messages)-4:]...)
+	}
+
+	var b strings.Builder
+	for i, msg := range sampled {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, msg)
+	}
+	return b.String()
 }
 
 // extractTextContent gets the text from a message content field.
