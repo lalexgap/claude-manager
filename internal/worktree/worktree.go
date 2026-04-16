@@ -110,25 +110,157 @@ func gitWorktrees(repoRoot string) []gitWorktree {
 	return wts
 }
 
+// CollisionAction controls what Create does when the requested branch is already
+// checked out in another worktree (including the main repo checkout).
+type CollisionAction int
+
+const (
+	// CollisionFail returns an error instead of silently picking a different branch.
+	CollisionFail CollisionAction = iota
+	// CollisionDerive creates a new branch with a unique suffixed name (e.g. "feat-2")
+	// based on the requested branch.
+	CollisionDerive
+	// CollisionNewName creates a new branch using CreateStrategy.NewName based on
+	// the requested branch.
+	CollisionNewName
+)
+
+// CreateStrategy configures how Create handles collisions.
+type CreateStrategy struct {
+	OnCollision CollisionAction
+	NewName     string // used when OnCollision == CollisionNewName
+}
+
+// CreateResult describes a successfully created worktree.
+type CreateResult struct {
+	Path        string // actual worktree path
+	Branch      string // branch the worktree is on (may differ from requested)
+	DerivedFrom string // original requested branch when Branch was redirected; "" otherwise
+}
+
+// ErrBranchInUse is returned by Create (with CollisionFail) when the requested branch
+// is already checked out in another worktree.
+type ErrBranchInUse struct {
+	Branch string
+	At     string // worktree path where the branch is checked out
+}
+
+func (e *ErrBranchInUse) Error() string {
+	return fmt.Sprintf("branch %q is already checked out at %s", e.Branch, e.At)
+}
+
 // Create creates a new git worktree at {repoRoot}/.claude/worktrees/{sanitized-branch}
 // and runs any WorktreeCreate hooks configured in settings files.
-// If the branch is already checked out elsewhere, uses --detach to avoid conflicts.
-func Create(repoRoot, branch string) (string, error) {
+// If base is non-empty, creates `branch` as a new branch off `base`.
+// On collision it returns ErrBranchInUse — call CreateWithStrategy to pick a different policy.
+func Create(repoRoot, branch, base string) (CreateResult, error) {
+	return CreateWithStrategy(repoRoot, branch, base, CreateStrategy{OnCollision: CollisionFail})
+}
+
+// CreateWithStrategy is Create but lets the caller decide what happens on collision.
+func CreateWithStrategy(repoRoot, branch, base string, strategy CreateStrategy) (CreateResult, error) {
 	worktreePath := Path(repoRoot, branch)
+	// If a base is provided, create `branch` as a new branch off `base`.
+	if base != "" {
+		args := []string{"-C", repoRoot, "worktree", "add", "-b", branch, worktreePath, base}
+		cmd := exec.Command("git", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return CreateResult{}, fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		}
+		runCreateHooks(repoRoot, worktreePath, branch)
+		return CreateResult{Path: worktreePath, Branch: branch}, nil
+	}
+	// If branch doesn't exist yet, create it from HEAD via -b
+	if !branchExists(repoRoot, branch) {
+		cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", branch, worktreePath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return CreateResult{}, fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		}
+		runCreateHooks(repoRoot, worktreePath, branch)
+		return CreateResult{Path: worktreePath, Branch: branch}, nil
+	}
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", worktreePath, branch)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		runCreateHooks(repoRoot, worktreePath, branch)
+		return CreateResult{Path: worktreePath, Branch: branch}, nil
+	}
+	if !isCollisionOutput(out) {
+		return CreateResult{}, fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Branch is already checked out elsewhere.
+	switch strategy.OnCollision {
+	case CollisionFail:
+		return CreateResult{}, &ErrBranchInUse{Branch: branch, At: BranchCheckedOutAt(repoRoot, branch)}
+	case CollisionDerive:
+		newBranch := uniqueBranchName(repoRoot, branch)
+		return createDerived(repoRoot, newBranch, branch)
+	case CollisionNewName:
+		if strategy.NewName == "" {
+			return CreateResult{}, fmt.Errorf("CollisionNewName requires a non-empty NewName")
+		}
+		return createDerived(repoRoot, strategy.NewName, branch)
+	default:
+		return CreateResult{}, fmt.Errorf("unknown collision action: %d", strategy.OnCollision)
+	}
+}
+
+// createDerived creates a new worktree for `newBranch`, forking from `baseBranch`.
+func createDerived(repoRoot, newBranch, baseBranch string) (CreateResult, error) {
+	worktreePath := Path(repoRoot, newBranch)
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", newBranch, worktreePath, baseBranch)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		// Branch already checked out — retry with --detach
-		if strings.Contains(string(out), "is already used by worktree") || strings.Contains(string(out), "is already checked out") {
-			cmd = exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", worktreePath, branch)
-			if out2, err2 := cmd.CombinedOutput(); err2 != nil {
-				return "", fmt.Errorf("%s: %s", err2, strings.TrimSpace(string(out2)))
-			}
-		} else {
-			return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		return CreateResult{}, fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+	}
+	runCreateHooks(repoRoot, worktreePath, newBranch)
+	return CreateResult{Path: worktreePath, Branch: newBranch, DerivedFrom: baseBranch}, nil
+}
+
+func isCollisionOutput(out []byte) bool {
+	s := string(out)
+	return strings.Contains(s, "is already used by worktree") || strings.Contains(s, "is already checked out")
+}
+
+// BranchCheckedOutAt returns the worktree path where the given branch is currently
+// checked out, or "" if the branch is not checked out anywhere.
+func BranchCheckedOutAt(repoRoot, branch string) string {
+	for _, wt := range gitWorktrees(repoRoot) {
+		if wt.branch == branch {
+			return wt.path
 		}
 	}
-	runCreateHooks(repoRoot, worktreePath, branch)
-	return worktreePath, nil
+	return ""
+}
+
+// branchExists returns true if the given local branch exists in repoRoot.
+func branchExists(repoRoot, branch string) bool {
+	cmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return cmd.Run() == nil
+}
+
+// uniqueBranchName returns a branch name derived from `base` that doesn't collide
+// with existing local branches or worktree paths. Tries base-2, base-3, ...
+func uniqueBranchName(repoRoot, base string) string {
+	existing := make(map[string]bool)
+	for _, b := range ListBranches(repoRoot) {
+		existing[b] = true
+	}
+	wtPaths := make(map[string]bool)
+	for _, wt := range gitWorktrees(repoRoot) {
+		wtPaths[wt.path] = true
+	}
+	for i := 2; i < 1000; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if existing[candidate] {
+			continue
+		}
+		if wtPaths[Path(repoRoot, candidate)] {
+			continue
+		}
+		return candidate
+	}
+	return fmt.Sprintf("%s-%d", base, 1000)
 }
 
 // Remove removes a worktree via git and cleans up the Claude session directory.
@@ -236,6 +368,10 @@ func runCreateHooks(repoRoot, worktreePath, branch string) {
 		return
 	}
 	input, _ := json.Marshal(map[string]string{
+		// Claude Code native WorktreeCreate hook fields
+		"cwd":  repoRoot,
+		"name": filepath.Base(worktreePath),
+		// Additional fields for hooks that want them directly
 		"worktreePath": worktreePath,
 		"branch":       branch,
 		"repoPath":     repoRoot,

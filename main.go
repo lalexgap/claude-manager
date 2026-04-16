@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,9 +39,9 @@ func main() {
 	case rest[0] == "n":
 		cwd, _ := os.Getwd()
 		if useWorktree {
-			worktreeNewSession(cwd, skipPerms)
+			worktreeNewSession(cwd, skipPerms, "", "")
 		} else {
-			startNewSession(cwd, skipPerms)
+			startNewSession(cwd, skipPerms, "", "")
 		}
 	case rest[0] == "list":
 		runList()
@@ -81,10 +83,12 @@ func runTUI(skipPerms, useWorktree bool) {
 	final := result.(tui.Model)
 
 	if path := final.NewSessionPath(); path != "" {
+		branch := final.NewSessionBranch()
+		base := final.NewSessionBaseBranch()
 		if final.UseWorktree {
-			worktreeNewSession(path, final.SkipPermissions)
+			worktreeNewSession(path, final.SkipPermissions, branch, base)
 		} else {
-			startNewSession(path, final.SkipPermissions)
+			startNewSession(path, final.SkipPermissions, branch, base)
 		}
 		return
 	}
@@ -143,16 +147,23 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 		os.Exit(1)
 	}
 
-	// If the stored project path no longer exists (e.g. a deleted worktree),
-	// resolve gracefully: recreate registered worktrees, or fall back to repo root.
-	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
-		resolved := worktree.ResolveWorktreePath(projectPath)
-		fmt.Fprintf(os.Stderr, "Warning: project directory not found (%s), using %s\n", projectPath, resolved)
-		projectPath = resolved
+	// Derive main repo root from path structure first (splitting on
+	// /.claude/worktrees/ or -worktrees/). This is more reliable than walking
+	// up via git, which can escape into unrelated ancestor repos when
+	// intermediate directories are missing or stale empty dirs exist.
+	repoRoot := deriveRepoRootFromWorktreePath(projectPath)
+	if repoRoot != "" {
+		if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: worktree directory not found; will recreate at %s\n", projectPath)
+		}
+	} else {
+		if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+			resolved := worktree.ResolveWorktreePath(projectPath)
+			fmt.Fprintf(os.Stderr, "Warning: project directory not found (%s), using %s\n", projectPath, resolved)
+			projectPath = resolved
+		}
+		repoRoot = findMainRepoRoot(projectPath)
 	}
-
-	// Find the main repo root (not a worktree checkout)
-	repoRoot := findMainRepoRoot(projectPath)
 	if repoRoot == "" {
 		fmt.Fprintf(os.Stderr, "Error finding git root for %s\n", projectPath)
 		os.Exit(1)
@@ -164,10 +175,15 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 	// Create worktree if it doesn't exist
 	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
 		fmt.Printf("Creating worktree at %s for branch %s...\n", wtPath, s.GitBranch)
-		wtPath, err = worktree.Create(repoRoot, s.GitBranch)
+		res, err := createWorktreeInteractive(repoRoot, s.GitBranch, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating worktree: %v\n", err)
 			os.Exit(1)
+		}
+		wtPath = res.Path
+		if res.DerivedFrom != "" {
+			fmt.Fprintf(os.Stderr, "Note: branch %s was already checked out; created new branch %s based on it.\n",
+				res.DerivedFrom, res.Branch)
 		}
 	} else {
 		fmt.Printf("Reusing existing worktree at %s\n", wtPath)
@@ -219,7 +235,7 @@ func worktreeResume(s sessions.Session, skipPermissions bool) {
 	}
 }
 
-func worktreeNewSession(projectPath string, skipPermissions bool) {
+func worktreeNewSession(projectPath string, skipPermissions bool, branch, base string) {
 	// Find the main repo root (not a worktree checkout)
 	repoRoot := findMainRepoRoot(projectPath)
 	if repoRoot == "" {
@@ -227,25 +243,36 @@ func worktreeNewSession(projectPath string, skipPermissions bool) {
 		os.Exit(1)
 	}
 
-	// Get current branch
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error detecting branch in %s: %v\n", projectPath, err)
-		os.Exit(1)
+	// If no branch provided, use current branch
+	if branch == "" {
+		cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD")
+		out, err := cmd.Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error detecting branch in %s: %v\n", projectPath, err)
+			os.Exit(1)
+		}
+		branch = strings.TrimSpace(string(out))
 	}
-	branch := strings.TrimSpace(string(out))
 
 	// Compute worktree path: <repoRoot>/.claude/worktrees/<sanitized-branch>
 	wtPath := worktree.Path(repoRoot, branch)
 
 	// Create worktree if it doesn't exist
 	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
-		fmt.Printf("Creating worktree at %s for branch %s...\n", wtPath, branch)
-		wtPath, err = worktree.Create(repoRoot, branch)
+		if base != "" {
+			fmt.Printf("Creating worktree at %s for new branch %s (based on %s)...\n", wtPath, branch, base)
+		} else {
+			fmt.Printf("Creating worktree at %s for branch %s...\n", wtPath, branch)
+		}
+		res, err := createWorktreeInteractive(repoRoot, branch, base)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating worktree: %v\n", err)
 			os.Exit(1)
+		}
+		wtPath = res.Path
+		if res.DerivedFrom != "" {
+			fmt.Fprintf(os.Stderr, "Note: branch %s was already checked out; created new branch %s based on it.\n",
+				res.DerivedFrom, res.Branch)
 		}
 	} else {
 		fmt.Printf("Reusing existing worktree at %s\n", wtPath)
@@ -276,7 +303,7 @@ func worktreeNewSession(projectPath string, skipPermissions bool) {
 	}
 }
 
-func startNewSession(projectPath string, skipPermissions bool) {
+func startNewSession(projectPath string, skipPermissions bool, branch, base string) {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: 'claude' not found in PATH\n")
@@ -286,6 +313,28 @@ func startNewSession(projectPath string, skipPermissions bool) {
 	if err := os.Chdir(projectPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Error changing to %s: %v\n", projectPath, err)
 		os.Exit(1)
+	}
+
+	if branch != "" {
+		var cmd *exec.Cmd
+		if base != "" {
+			// Create new branch off base
+			cmd = exec.Command("git", "checkout", "-b", branch, base)
+		} else {
+			// Use branch directly: checkout existing, or create from HEAD
+			verify := exec.Command("git", "rev-parse", "--verify", "refs/heads/"+branch)
+			if verify.Run() == nil {
+				cmd = exec.Command("git", "checkout", branch)
+			} else {
+				cmd = exec.Command("git", "checkout", "-b", branch)
+			}
+		}
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking out branch %s: %v\n", branch, err)
+			os.Exit(1)
+		}
 	}
 
 	fmt.Printf("Starting new session in %s...\n", projectPath)
@@ -300,6 +349,96 @@ func startNewSession(projectPath string, skipPermissions bool) {
 		fmt.Fprintf(os.Stderr, "Error exec: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// createWorktreeInteractive calls worktree.Create with CollisionFail; if the branch is
+// already checked out, it prompts the user on stdin and retries with the chosen strategy.
+func createWorktreeInteractive(repoRoot, branch, base string) (worktree.CreateResult, error) {
+	res, err := worktree.Create(repoRoot, branch, base)
+	var inUse *worktree.ErrBranchInUse
+	if !errors.As(err, &inUse) {
+		return res, err
+	}
+	strategy, perr := promptBranchCollision(branch, inUse.At)
+	if perr != nil {
+		return worktree.CreateResult{}, perr
+	}
+	return worktree.CreateWithStrategy(repoRoot, branch, base, strategy)
+}
+
+// promptBranchCollision asks the user how to resolve a branch-already-checked-out
+// collision via stdin. Returns the chosen strategy or an error on cancel / EOF.
+func promptBranchCollision(branch, checkedOutAt string) (worktree.CreateStrategy, error) {
+	fmt.Fprintf(os.Stderr, "\nBranch %q is already checked out at %s\n", branch, checkedOutAt)
+	fmt.Fprintln(os.Stderr, "How would you like to proceed?")
+	fmt.Fprintf(os.Stderr, "  [1] Create a derived branch (e.g. %s-2) based on %s  (default)\n", branch, branch)
+	fmt.Fprintln(os.Stderr, "  [2] Enter a new branch name")
+	fmt.Fprintln(os.Stderr, "  [3] Cancel")
+	fmt.Fprint(os.Stderr, "> ")
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		return worktree.CreateStrategy{}, fmt.Errorf("could not read input: %w", err)
+	}
+	choice := strings.TrimSpace(line)
+
+	switch choice {
+	case "", "1":
+		return worktree.CreateStrategy{OnCollision: worktree.CollisionDerive}, nil
+	case "2":
+		fmt.Fprint(os.Stderr, "New branch name: ")
+		nameLine, err := reader.ReadString('\n')
+		if err != nil && nameLine == "" {
+			return worktree.CreateStrategy{}, fmt.Errorf("could not read branch name: %w", err)
+		}
+		newName := strings.TrimSpace(nameLine)
+		if newName == "" {
+			return worktree.CreateStrategy{}, fmt.Errorf("empty branch name")
+		}
+		if err := validateBranchName(newName); err != nil {
+			return worktree.CreateStrategy{}, err
+		}
+		return worktree.CreateStrategy{OnCollision: worktree.CollisionNewName, NewName: newName}, nil
+	case "3":
+		return worktree.CreateStrategy{}, fmt.Errorf("cancelled")
+	default:
+		return worktree.CreateStrategy{}, fmt.Errorf("unknown choice %q", choice)
+	}
+}
+
+func validateBranchName(name string) error {
+	cmd := exec.Command("git", "check-ref-format", "--branch", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("invalid branch name %q: %s", name, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// deriveRepoRootFromWorktreePath extracts the main repo root from a worktree-style path.
+// e.g. "/Users/x/producthunt/.claude/worktrees/foo" -> "/Users/x/producthunt"
+// Returns "" if the path doesn't look like a known worktree layout or the derived root
+// isn't a valid git repo.
+func deriveRepoRootFromWorktreePath(p string) string {
+	for _, marker := range []string{"/.claude/worktrees/", "-worktrees/"} {
+		idx := strings.Index(p, marker)
+		if idx < 0 {
+			continue
+		}
+		root := p[:idx]
+		if _, err := os.Stat(root); err != nil {
+			continue
+		}
+		cmd := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel")
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(out)) == root {
+			return root
+		}
+	}
+	return ""
 }
 
 // findMainRepoRoot returns the main repository root, not a worktree checkout root.

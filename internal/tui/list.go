@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"claude-manager/internal/sessions"
@@ -80,6 +82,34 @@ func filterSessions(all []sessions.Session, query string, fullText bool) []sessi
 		}
 	}
 	return result
+}
+
+// filterByCwd returns sessions whose ProjectPath is cwd itself or lives underneath it.
+// Paths are compared after filepath.Clean to avoid trailing-separator mismatches.
+func filterByCwd(all []sessions.Session, cwd string) []sessions.Session {
+	if cwd == "" {
+		return all
+	}
+	var result []sessions.Session
+	for _, s := range all {
+		if sessionInCwd(s, cwd) {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// sessionInCwd reports whether the session was started at cwd or in a subdirectory.
+func sessionInCwd(s sessions.Session, cwd string) bool {
+	if cwd == "" || s.ProjectPath == "" {
+		return false
+	}
+	root := filepath.Clean(cwd)
+	p := filepath.Clean(s.ProjectPath)
+	if p == root {
+		return true
+	}
+	return strings.HasPrefix(p, root+string(os.PathSeparator))
 }
 
 // filterByProject returns sessions whose project name contains the given substring.

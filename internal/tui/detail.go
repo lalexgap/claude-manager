@@ -40,6 +40,11 @@ func renderDetail(s sessions.Session, width, height int) string {
 		row("Session ID:", s.ID),
 	}
 
+	if !s.IsWorktree() && s.GitBranch != "" {
+		hint := fmt.Sprintf("w: resume in new worktree on branch %s", s.GitBranch)
+		lines = append(lines, lipgloss.NewStyle().Foreground(dimText).Italic(true).Render(hint))
+	}
+
 	if s.FirstMessage != "" {
 		prompt := strings.Join(strings.Fields(s.FirstMessage), " ")
 		if len(prompt) > innerWidth*2 {
